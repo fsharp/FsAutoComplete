@@ -636,6 +636,84 @@ let tooltipTests =
     verifyDescription 13 10 (concatLines ["**Description**"; ""; "\nMy super summary\n "; ""; "**Parameters**"; ""; "* `c`: foo"; "* `b`: bar"; "* `a`: baz"; ""; "**Returns**"; ""; ""])
   ]
 
+let formattingTests =
+  let serverStart = lazy (
+    let path = Path.Combine(__SOURCE_DIRECTORY__, "TestCases", "Formatting")
+    let (server, events) = serverInitialize path defaultConfigDto
+    do waitForWorkspaceFinishedParsing events
+    server, events, path
+  )
+  let serverTest f () = f serverStart.Value
+
+  let editForWholeFile sourceFile expectedFile =
+    let sourceLines = File.ReadAllLines sourceFile
+    let start = { Line = 0; Character = 0 }
+    let ``end`` = { Line = sourceLines.Length - 1; Character = sourceLines.[sourceLines.Length - 1].Length }
+    let expectedText = File.ReadAllText expectedFile
+    { Range = { Start = start; End = ``end`` }; NewText = expectedText }
+
+  let verifyFormatting (server: Lsp.FsharpLspServer, events, rootPath) scenario =
+    let sourceFile = Path.Combine(rootPath, sprintf "%s.input.fsx" scenario)
+    let expectedFile = Path.Combine(rootPath, sprintf "%s.expected.fsx" scenario)
+    let expectedTextEdit = editForWholeFile sourceFile expectedFile
+    do server.TextDocumentDidOpen { TextDocument = loadDocument sourceFile } |> Async.RunSynchronously
+    match waitForParseResultsForFile (Path.GetFileName sourceFile) events with
+    | Ok () ->
+      match server.TextDocumentFormatting { TextDocument = { Uri = filePathToUri sourceFile }
+                                            Options = { TabSize = 4
+                                                        InsertSpaces = true
+                                                        AdditionalData = dict [] } } |> Async.RunSynchronously with
+      | Ok (Some [|edit|]) ->
+        Expect.equal edit expectedTextEdit "should replace the entire file range with the expected content"
+      | Ok other ->
+        failwithf "Invalid formatting result: %A" other
+      | Result.Error e ->
+        failwithf "Error while formatting %s: %A" sourceFile e
+    | Core.Result.Error errors ->
+      failwithf "Errors while parsing script %s: %A" sourceFile errors
+
+  testList "fantomas integration" [
+    testCase "can replace entire content of file when formatting whole document" (serverTest (fun state ->
+      verifyFormatting state "endCharacter"
+    ))
+  ]
+
+let dependencyManagerTests =
+  let serverStart useCorrectPaths =
+    let workingDir = Path.Combine(__SOURCE_DIRECTORY__, "TestCases", "DependencyManagement")
+    let dependencyManagerAssemblyDir = Path.Combine(__SOURCE_DIRECTORY__, "..", "FsAutoComplete.DependencyManager.Dummy", "bin", "Debug", "netstandard2.0")
+    let dependencyManagerEnabledConfig =
+      { defaultConfigDto with
+          FSIExtraParameters = Some [| "--langversion:preview" |]
+          FSICompilerToolLocations = Some [| if useCorrectPaths then dependencyManagerAssemblyDir |] }
+    let (server, events) = serverInitialize workingDir dependencyManagerEnabledConfig
+    let scriptPath = Path.Combine(workingDir, "Script.fsx")
+    do waitForWorkspaceFinishedParsing events
+    do server.TextDocumentDidOpen { TextDocument = loadDocument scriptPath } |> Async.RunSynchronously
+    server, events, workingDir, scriptPath
+
+  let serverTest correctManagerPaths f = fun () -> f (serverStart correctManagerPaths)
+
+  testList "dependencyManager integrations" [
+    testCase "can typecheck script that depends on #r dummy dependency manager" (serverTest true (fun (server, events, workingDir, testFilePath) ->
+      do server.TextDocumentDidOpen { TextDocument = loadDocument testFilePath } |> Async.RunSynchronously
+      match waitForParseResultsForFile "Script.fsx" events with
+      | Ok _ -> ()
+      | Core.Result.Error e ->
+        failwithf "Error during typechecking: %A" e
+    ))
+    testCase "fails to typecheck script when dependency manager is missing" (serverTest false (fun (server, events, workingDir, testFilePath) ->
+      do server.TextDocumentDidOpen { TextDocument = loadDocument testFilePath } |> Async.RunSynchronously
+      match waitForParseResultsForFile "Script.fsx" events with
+      | Ok _ ->
+        failwith "Expected to fail typechecking a script with a dependency manager that's missing"
+      | Core.Result.Error e ->
+        match e with
+        | [| { Code = Some "3216" } |] -> () // this is the error code that signals a missing dependency manager, so this is a 'success'
+        | e -> failwithf "Unexpected error during typechecking: %A" e
+    ))
+  ]
+
 
 let highlightingTets =
   let serverStart = lazy (

@@ -1,5 +1,5 @@
 #r "paket:
-nuget Fake.Core.Target //"
+nuget Fake.Core.Target 5.20.0 //"
 
 #load "./.fake/build.fsx/intellisense.fsx"
 
