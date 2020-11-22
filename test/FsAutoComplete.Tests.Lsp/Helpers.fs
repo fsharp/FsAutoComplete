@@ -185,6 +185,10 @@ let clientCaps : ClientCapabilities =
 open Expecto.Logging
 open Expecto.Logging.Message
 open System.Threading
+open System.Runtime.InteropServices
+open System.IO
+open Mono.Unix
+open SymbolicLinkSupport
 
 
 let logEvent n =
@@ -200,11 +204,55 @@ let dotnetCleanup baseDir =
   |> List.filter Directory.Exists
   |> List.iter (fun path -> Directory.Delete(path, true))
 
+let followLink (path: string) =
+  match Environment.OSVersion.Platform with
+  | PlatformID.Win32NT ->
+    let fi = System.IO.FileInfo(path)
+    if fi.IsSymbolicLink () then fi.GetSymbolicLinkTarget() else path
+  | PlatformID.Unix
+  | PlatformID.MacOSX ->
+    UnixPath.GetCompleteRealPath path
+  | _ -> path
 
+type ToolResult =
+| ExactPath of path: string
+| Snap of path: string
 
-let runProcess (log: string -> unit) (workingDir: string) (exePath: string) (args: string) =
+let probeForTool (toolName: string) =
+  let toolNameVariations = [toolName; System.IO.Path.ChangeExtension(toolName, ".exe") ]
+  let pathSplitter = if RuntimeInformation.IsOSPlatform OSPlatform.Windows then ";" else ":"
+  let paths = System.Environment.GetEnvironmentVariable("PATH").Split(pathSplitter)
+  let combinations =
+    [| for path in paths do
+        for tool in toolNameVariations do
+          yield path, tool |]
+  combinations
+  |> Array.map System.IO.Path.Combine
+  |> Array.tryFind (fun fullPath -> System.IO.FileInfo(fullPath).Exists)
+  |> Option.map (fun path ->
+    let followed = followLink path
+    if Path.GetFileName followed = "snap"
+    then Snap path
+    else ExactPath path
+  )
+
+let invokeToolWithoutRedirection toolAlias workingDir args =
   let psi = System.Diagnostics.ProcessStartInfo()
-  psi.FileName <- exePath
+  psi.FileName <- toolAlias
+  psi.WorkingDirectory <- workingDir
+  psi.Arguments <- args
+  psi.CreateNoWindow <- true
+  psi.UseShellExecute <- true
+
+  printfn $"running %s{psi.FileName} from %s{psi.WorkingDirectory} with args %s{args}"
+  let p = new System.Diagnostics.Process()
+  p.StartInfo <- psi
+  p.Start() |> ignore
+  p
+
+let invokeToolWithRedirection log tool workingDir args =
+  let psi = System.Diagnostics.ProcessStartInfo()
+  psi.FileName <- tool
   psi.WorkingDirectory <- workingDir
   psi.RedirectStandardOutput <- true
   psi.RedirectStandardError <- true
@@ -212,7 +260,8 @@ let runProcess (log: string -> unit) (workingDir: string) (exePath: string) (arg
   psi.CreateNoWindow <- true
   psi.UseShellExecute <- false
 
-  use p = new System.Diagnostics.Process()
+  printfn $"running %s{psi.FileName} from %s{psi.WorkingDirectory} with args %s{args}"
+  let p = new System.Diagnostics.Process()
   p.StartInfo <- psi
 
   p.OutputDataReceived.Add(fun ea -> log (ea.Data))
@@ -222,22 +271,28 @@ let runProcess (log: string -> unit) (workingDir: string) (exePath: string) (arg
   p.Start() |> ignore
   p.BeginOutputReadLine()
   p.BeginErrorReadLine()
+  p
+let runProcess (log: string -> unit) (workingDir: string) (exePath: string) (args: string) =
+  use p =
+    match defaultArg (probeForTool exePath) (ExactPath exePath) with
+    | Snap toolAlias -> invokeToolWithoutRedirection toolAlias workingDir args
+    | ExactPath tool -> invokeToolWithRedirection log tool workingDir args
+
   p.WaitForExit()
 
   let exitCode = p.ExitCode
 
-  exitCode, (workingDir, exePath, args)
+  exitCode, (workingDir, p.StartInfo.FileName, args)
 
-let expectExitCodeZero (exitCode, _) =
-  Expect.equal exitCode 0 (sprintf "expected exit code zero but was %i" exitCode)
-
+let expectExitCodeZero (exitCode, (workdir, exePath, args)) =
+  Expect.equal exitCode 0 (sprintf "expected exit code 0 but was %i from invoking '%s %s' in directory %s" exitCode exePath args workdir)
 
 let serverInitialize path (config: FSharpConfigDto) =
   dotnetCleanup path
   let files = Directory.GetFiles(path)
 
   if files |> Seq.exists (fun p -> p.EndsWith ".fsproj") then
-    runProcess (logDotnetRestore ("Restore" + path)) path "dotnet" "restore"
+    runProcess (logDotnetRestore ("Restore " + path)) path "dotnet" "restore"
     |> expectExitCodeZero
 
   let server, event = createServer()
