@@ -7,7 +7,7 @@ open FsAutoComplete.CodeFix.Types
 open LanguageServerProtocol.Types
 open FsAutoComplete
 open FsAutoComplete.LspHelpers
-open FSharp.Compiler.SourceCodeServices
+open FSharp.Compiler.EditorServices
 open FSharp.Compiler.SyntaxTree
 open FSharp.Compiler.Text
 
@@ -26,15 +26,15 @@ type FSharpParseFileResults with
 
             override _.VisitBinding(defaultTraverse, binding) =
                 match binding with
-                | SynBinding.Binding(_, SynBindingKind.NormalBinding, _, _, _, _, _, pat, _, _, _, _) as binding ->
+                | SynBinding(_, SynBindingKind.Normal, _, _, _, _, _, pat, _, _, _, _) as binding ->
                     if posBetween binding.RangeOfHeadPat pos then
-                        Some binding.RangeOfBindingAndRhs
+                        Some binding.RangeOfBindingWithRhs
                     else
                         // Check if it's an operator
                         match pat with
                         | SynPat.LongIdent(LongIdentWithDots([id], _), _, _, _, _, _) when id.idText.StartsWith("op_") ->
                             if posBetween id.idRange pos then
-                                Some binding.RangeOfBindingAndRhs
+                                Some binding.RangeOfBindingWithRhs
                             else
                                 defaultTraverse binding
                         | _ -> defaultTraverse binding
