@@ -1,5 +1,5 @@
 FSharp.Compiler.Service
-FSharpLint.Core
+#FSharpLint.Core
 Ionide.ProjInfo
 Ionide.ProjInfo.FCS
 Ionide.ProjInfo.ProjectSystem
@@ -11,11 +11,11 @@ Microsoft.SourceLink.GitHub
 Dapper
 Microsoft.Data.Sqlite
 System.Configuration.ConfigurationManager
-Fantomas
-Fantomas.Extras
+//Fantomas
+//Fantomas.Extras
 FSharp.UMX
 FsToolkit.ErrorHandling
 
 System.Reflection.Metadata
-FSharp.Formatting
+#FSharp.Formatting
 Microsoft.Build.Utilities.Core

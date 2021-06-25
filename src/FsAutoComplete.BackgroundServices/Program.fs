@@ -8,13 +8,19 @@ open LanguageServerProtocol.Types
 open LanguageServerProtocol
 open FSharp.Compiler
 open FSharp.Compiler.Text
-open FSharp.Compiler.SourceCodeServices
+open FSharp.Compiler.EditorServices
 open System.Collections.Concurrent
 open FsAutoComplete
 open Ionide.ProjInfo.ProjectSystem
 open FSharp.UMX
 open System.Reactive.Linq
 open FSharp.Compiler.Text
+open FSharp.Compiler.CodeAnalysis
+open FSharp.Compiler.Diagnostics
+open FSharp.Compiler.IO
+
+// FCS FileSystem APIs are experimental
+#nowarn "57"
 
 type BackgroundFileCheckType =
 | SourceFile of filePath: string
@@ -53,6 +59,21 @@ with
         { Files = ConcurrentDictionary(); FileCheckOptions = ConcurrentDictionary() }
 
 module Helpers =
+    /// convert an LSP position to a compiler position
+    let protocolPosToPos (pos: LanguageServerProtocol.Types.Position): FSharp.Compiler.Text.Position =
+        FSharp.Compiler.Text.Position.mkPos (pos.Line + 1) (pos.Character)
+
+    /// convert a compiler position to an LSP position
+    let fcsPosToLsp (pos: FSharp.Compiler.Text.Position): LanguageServerProtocol.Types.Position =
+        { Line = pos.Line - 1; Character = pos.Column }
+
+    /// convert a compiler range to an LSP range
+    let fcsRangeToLsp(range: FSharp.Compiler.Text.Range): LanguageServerProtocol.Types.Range =
+        {
+            Start = fcsPosToLsp range.Start
+            End = fcsPosToLsp range.End
+        }
+
     let fcsSeverityToDiagnostic = function
         | FSharpDiagnosticSeverity.Error -> Some DiagnosticSeverity.Error
         | FSharpDiagnosticSeverity.Warning -> Some DiagnosticSeverity.Warning
@@ -64,11 +85,7 @@ module Helpers =
 
     let fcsErrorToDiagnostic (error: FSharpDiagnostic) =
         {
-            Range =
-                {
-                    Start = { Line = error.StartLineAlternate - 1; Character = error.StartColumn }
-                    End = { Line = error.EndLineAlternate - 1; Character = error.EndColumn }
-                }
+            Range = fcsRangeToLsp error.Range
             Severity = fcsSeverityToDiagnostic error.Severity
             Source = "F# Compiler"
             Message = error.Message
@@ -120,7 +137,6 @@ type BackgroundServiceServer(state: State, client: FsacClient) =
 
     let checker = FSharpChecker.Create(projectCacheSize = 1, keepAllBackgroundResolutions = false, suggestNamesForErrors = false)
 
-    do checker.ImplicitlyStartBackgroundWork <- false
     let mutable latestSdkVersion = lazy None
     let mutable latestRuntimeVersion = lazy None
     //TODO: does the backgroundservice ever get config updates?
@@ -210,7 +226,7 @@ type BackgroundServiceServer(state: State, client: FsacClient) =
                     match ignoredFile with
                     | Some fn when fn = file -> return ()
                     | _ ->
-                        let errors = Array.append pr.Errors res.Errors |> Array.map (Helpers.fcsErrorToDiagnostic)
+                        let errors = Array.append pr.Diagnostics res.Diagnostics |> Array.map (Helpers.fcsErrorToDiagnostic)
                         let msg = {Diagnostics = errors; Uri = Helpers.filePathToUri file}
                         do! client.SendDiagnostics msg
                         return ()
@@ -228,7 +244,7 @@ type BackgroundServiceServer(state: State, client: FsacClient) =
                     match ignoredFile with
                     | Some fn when fn = file -> return ()
                     | _ ->
-                        let errors = Array.append pr.Errors res.Errors |> Array.map (Helpers.fcsErrorToDiagnostic)
+                        let errors = Array.append pr.Diagnostics res.Diagnostics |> Array.map (Helpers.fcsErrorToDiagnostic)
                         let msg = {Diagnostics = errors; Uri = Helpers.filePathToUri file}
                         do! client.SendDiagnostics msg
                         return ()
@@ -247,7 +263,7 @@ type BackgroundServiceServer(state: State, client: FsacClient) =
             |> Seq.distinctBy (fun o -> o.ProjectFileName)
             |> Seq.filter (fun o ->
                 o.ReferencedProjects
-                |> Array.map (fun (_,v) -> Path.GetFullPath v.ProjectFileName)
+                |> Array.map (fun p -> Path.GetFullPath p.FileName)
                 |> Array.contains s.ProjectFileName )
             |> Seq.toList
 
@@ -338,6 +354,7 @@ type BackgroundServiceServer(state: State, client: FsacClient) =
             let vf =
               { Lines = SourceText.ofString p.Content
                 Touched = DateTime.Now
+                Created = File.GetCreationTimeUtc (UMX.untag file)
                 Version = Some p.Version }
             state.Files.AddOrUpdate(file, (fun _ -> vf),( fun _ _ -> vf) ) |> ignore
             let! filesToCheck = defaultArg (getListOfFilesForProjectChecking p.File) (async.Return [])
@@ -382,8 +399,9 @@ type BackgroundServiceServer(state: State, client: FsacClient) =
     override _.Dispose () =
       clearOldCacheSubscription.Dispose()
 
-
 module Program =
+
+
     let state = State.Initial
 
     let startCore () =
@@ -398,14 +416,16 @@ module Program =
 
         LanguageServerProtocol.Server.start requestsHandlings input output FsacClient (fun lspClient -> new BackgroundServiceServer(state, lspClient))
 
-
-
     [<EntryPoint>]
     let main argv =
 
         let pid = Int32.Parse argv.[0]
         let originalFs = FileSystemAutoOpens.FileSystem
-        let fs = FileSystem(originalFs, state.Files.TryFind) :> IFileSystem
+        let tryRemove path =
+          match state.Files.TryRemove(path: string<LocalPath>) with
+          | true, f -> ()
+          | false,  _ -> ()
+        let fs = FsAutoComplete.FileSystem(originalFs, state.Files.TryFind, tryRemove) :> IFileSystem
         FileSystemAutoOpens.FileSystem <- fs
         ProcessWatcher.zombieCheckWithHostPID (fun () -> exit 0) pid
         SymbolCache.initCache (Environment.CurrentDirectory)

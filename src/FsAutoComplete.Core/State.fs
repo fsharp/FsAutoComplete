@@ -1,7 +1,8 @@
 ﻿namespace FsAutoComplete
 
 open System
-open FSharp.Compiler.SourceCodeServices
+open FSharp.Compiler.EditorServices
+open FSharp.Compiler.CodeAnalysis
 open System.Collections.Concurrent
 open System.Threading
 open FSharp.Compiler.Text
@@ -10,7 +11,7 @@ open FSharp.UMX
 open System.Diagnostics
 
 type DeclName = string
-type CompletionNamespaceInsert = { Namespace: string; Position: Pos; Scope : ScopeKind }
+type CompletionNamespaceInsert = { Namespace: string; Position: Position; Scope : ScopeKind }
 
 [<DebuggerDisplay("{DebugString}")>]
 type State =
@@ -19,12 +20,12 @@ type State =
     LastCheckedVersion: ConcurrentDictionary<string<LocalPath>, int>
     ProjectController: ProjectController
 
-    HelpText : ConcurrentDictionary<DeclName, FSharpToolTipText>
-    Declarations: ConcurrentDictionary<DeclName, FSharpDeclarationListItem * Pos * string<LocalPath>>
+    HelpText : ConcurrentDictionary<DeclName, ToolTipText>
+    Declarations: ConcurrentDictionary<DeclName, DeclarationListItem * Position * string<LocalPath>>
     CompletionNamespaceInsert : ConcurrentDictionary<DeclName, CompletionNamespaceInsert>
-    mutable CurrentAST: FSharp.Compiler.SyntaxTree.ParsedInput option
+    mutable CurrentAST: FSharp.Compiler.Syntax.ParsedInput option
 
-    NavigationDeclarations : ConcurrentDictionary<string<LocalPath>, FSharpNavigationTopLevelDeclaration[]>
+    NavigationDeclarations : ConcurrentDictionary<string<LocalPath>, NavigationTopLevelDeclaration[]>
     CancellationTokens: ConcurrentDictionary<string<LocalPath>, CancellationTokenSource list>
 
     ScriptProjectOptions: ConcurrentDictionary<string<LocalPath>, int * FSharpProjectOptions>
@@ -49,7 +50,11 @@ type State =
   member x.RefreshCheckerOptions(file: string<LocalPath>, text: ISourceText) : FSharpProjectOptions option =
     x.ProjectController.GetProjectOptions (UMX.untag file)
     |> Option.map (fun opts ->
-        x.Files.[file] <- { Lines = text; Touched = DateTime.Now; Version = None }
+        let createDate =
+          match x.Files.TryFind file with
+          | None -> System.IO.File.GetCreationTimeUtc (UMX.untag file)
+          | Some file -> file.Created
+        x.Files.[file] <- { Lines = text; Touched = DateTime.Now; Version = None; Created = createDate }
         opts
     )
 
@@ -57,7 +62,8 @@ type State =
     x.ProjectController.GetProjectOptions (UMX.untag file)
 
   member x.GetProjectOptions'(file: string<LocalPath>) : FSharpProjectOptions =
-    (x.ProjectController.GetProjectOptions (UMX.untag file)).Value
+    x.ProjectController.GetProjectOptions (UMX.untag file)
+    |> Option.get
 
   member x.RemoveProjectOptions(file: string<LocalPath>) : unit =
     x.ProjectController.RemoveProjectOptions (UMX.untag file)
@@ -82,12 +88,12 @@ type State =
     x.LastCheckedVersion.[file] <- version
 
   member x.AddFileTextAndCheckerOptions(file: string<LocalPath>, text: ISourceText, opts, version) =
-    let fileState = { Lines = text; Touched = DateTime.Now; Version = version }
+    let fileState = { Lines = text; Touched = DateTime.Now; Version = version; Created = System.IO.File.GetCreationTimeUtc (UMX.untag file) }
     x.Files.[file] <- fileState
     x.ProjectController.SetProjectOptions(UMX.untag file, opts)
 
   member x.AddFileText(file: string<LocalPath>, text: ISourceText, version) =
-    let fileState = { Lines = text; Touched = DateTime.Now; Version = version }
+    let fileState = { Lines = text; Touched = DateTime.Now; Version = version; Created = System.IO.File.GetCreationTimeUtc (UMX.untag file) }
     x.Files.[file] <- fileState
 
   member x.AddCancellationToken(file : string<LocalPath>, token: CancellationTokenSource) =
@@ -112,10 +118,9 @@ type State =
       LoadTime = DateTime.Now
       UnresolvedReferences = None
       OriginalLoadReferences = []
-      ExtraProjectInfo = None
       Stamp = None}
 
-  member x.TryGetFileCheckerOptionsWithLines(file: string<LocalPath>) : ResultOrString<FSharpProjectOptions * ISourceText> =
+  member x.TryGetFileCheckerOptionsWithSourceText(file: string<LocalPath>) : ResultOrString<FSharpProjectOptions * ISourceText> =
     match x.Files.TryFind(file) with
     | None -> ResultOrString.Error (sprintf "File '%s' not parsed" (UMX.untag file))
     | Some (volFile) ->
@@ -125,7 +130,7 @@ type State =
       | Some opts -> Ok (opts, volFile.Lines)
 
   member x.TryGetFileCheckerOptionsWithSource(file: string<LocalPath>) : ResultOrString<FSharpProjectOptions * ISourceText> =
-    match x.TryGetFileCheckerOptionsWithLines(file) with
+    match x.TryGetFileCheckerOptionsWithSourceText(file) with
     | ResultOrString.Error x -> ResultOrString.Error x
     | Ok (opts, lines) -> Ok (opts, lines)
 
@@ -134,8 +139,8 @@ type State =
     | None -> ResultOrString.Error (sprintf "File '%s' not parsed" (UMX.untag file))
     | Some f -> Ok f.Lines
 
-  member x.TryGetFileCheckerOptionsWithLinesAndLineStr(file: string<LocalPath>, pos : Pos) : ResultOrString<FSharpProjectOptions * ISourceText * LineStr> =
-    match x.TryGetFileCheckerOptionsWithLines(file) with
+  member x.TryGetFileCheckerOptionsWithSourceTextAndLineStr(file: string<LocalPath>, pos : Position) : ResultOrString<FSharpProjectOptions * ISourceText * LineStr> =
+    match x.TryGetFileCheckerOptionsWithSourceText(file) with
     | Error x -> Error x
     | Ok (opts, text) ->
       let lineCount = text.GetLineCount()

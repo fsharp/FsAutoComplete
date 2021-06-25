@@ -1,7 +1,9 @@
 namespace FsAutoComplete
 
 open System.IO
-open FSharp.Compiler.SourceCodeServices
+open FSharp.Compiler.EditorServices
+open FSharp.Compiler.CodeAnalysis
+open FSharp.Compiler.Symbols
 open Utils
 open FSharp.Compiler.Text
 open FsAutoComplete.Logging
@@ -18,14 +20,17 @@ type FSharpCompilerServiceChecker(backgroundServiceEnabled, hasAnalyzers) =
       keepAssemblyContents = hasAnalyzers,
       suggestNamesForErrors = true,
       enablePartialTypeChecking = not hasAnalyzers,
-      enableBackgroundItemKeyStoreAndSemanticClassification = true)
+      enableBackgroundItemKeyStoreAndSemanticClassification = true,
+      keepAllBackgroundSymbolUses = false
+      )
 
-  do checker.ImplicitlyStartBackgroundWork <- not backgroundServiceEnabled
-  do checker.BeforeBackgroundFileCheck.Add ignore
+  do
+    checker.BeforeBackgroundFileCheck.Add ignore
+    // checker.ImplicitlyStartBackgroundWork <- true
 
   // we only want to let people hook onto the underlying checker event if there's not a background service actually compiling things for us
   let safeFileCheckedEvent =
-    if not backgroundServiceEnabled then checker.FileChecked else (new Event<string * obj option>()).Publish
+    if not backgroundServiceEnabled then checker.FileChecked else (new Event<string * FSharpProjectOptions>()).Publish
 
   // /// FCS only accepts absolute file paths, so this ensures that by
   // /// rooting relative paths onto HOME on *nix and %HOMRDRIVE%%HOMEPATH% on windows
@@ -106,10 +111,6 @@ type FSharpCompilerServiceChecker(backgroundServiceEnabled, hasAnalyzers) =
   let clearProjectReferences (opts: FSharpProjectOptions) =
     if disableInMemoryProjectReferences then {opts with ReferencedProjects = [||]} else opts
 
-  let logQueueLength (logger: ILog) msg =
-    checkerLogger.trace (Log.setMessage "Current Queue Length is {queueLength}" >> Log.addContextDestructured "queueLength" checker.CurrentQueueLength)
-    logger.info msg
-
   /// replace any BCL/FSharp.Core/FSI refs that FCS gives us with our own set, which is more probe-able
   let replaceFrameworkRefs (projOptions: FSharpProjectOptions) =
     let refs, otherOptions = projOptions.OtherOptions |> Array.partition (fun r -> r.StartsWith "-r:")
@@ -152,7 +153,7 @@ type FSharpCompilerServiceChecker(backgroundServiceEnabled, hasAnalyzers) =
   /// ensures that any user-configured include/load files are added to the typechecking context
   let addLoadedFiles (projectOptions: FSharpProjectOptions) =
     let files = Array.append fsiAdditionalFiles projectOptions.SourceFiles
-    logQueueLength optsLogger (Log.setMessage "Source file list is {files}" >> Log.addContextDestructured "files" files)
+    optsLogger.info (Log.setMessage "Source file list is {files}" >> Log.addContextDestructured "files" files)
     { projectOptions with
         SourceFiles = files }
 
@@ -171,11 +172,11 @@ type FSharpCompilerServiceChecker(backgroundServiceEnabled, hasAnalyzers) =
         yield! options
                |> Seq.map snd
                |> Seq.distinctBy (fun o -> o.ProjectFileName)
-               |> Seq.filter (fun o -> o.ReferencedProjects |> Array.map (fun (_,v) -> Path.GetFullPath v.ProjectFileName) |> Array.contains option.ProjectFileName )
+               |> Seq.filter (fun o -> o.ReferencedProjects |> Array.map (fun reference -> Path.GetFullPath reference.FileName) |> Array.contains option.ProjectFileName )
       ])
 
   member private __.GetNetFxScriptOptions(file: string<LocalPath>, source) = async {
-    logQueueLength optsLogger (Log.setMessage "Getting NetFX options for script file {file}" >> Log.addContextDestructured "file" file)
+    optsLogger.info (Log.setMessage "Getting NetFX options for script file {file}" >> Log.addContextDestructured "file" file)
     let allFlags = Array.append [| "--targetprofile:mscorlib" |] fsiAdditionalArguments
     let! (opts, errors) = checker.GetProjectOptionsFromScript(UMX.untag file, source, assumeDotNetFramework = true, useFsiAuxLib = true, otherFlags = allFlags, userOpName = "getNetFrameworkScriptOptions")
     let allModifications = addLoadedFiles >> resolveRelativeFilePaths
@@ -183,7 +184,7 @@ type FSharpCompilerServiceChecker(backgroundServiceEnabled, hasAnalyzers) =
   }
 
   member private __.GetNetCoreScriptOptions(file: string<LocalPath>, source) = async {
-    logQueueLength optsLogger (Log.setMessage "Getting NetCore options for script file {file}" >> Log.addContextDestructured "file" file)
+    optsLogger.info (Log.setMessage "Getting NetCore options for script file {file}" >> Log.addContextDestructured "file" file)
     let allFlags = Array.append [| "--targetprofile:netstandard" |] fsiAdditionalArguments
     let! (opts, errors) = checker.GetProjectOptionsFromScript(UMX.untag file, source, assumeDotNetFramework = false, useSdkRefs = true, useFsiAuxLib = true, otherFlags = allFlags, userOpName = "getNetCoreScriptOptions")
     let allModifications = replaceFrameworkRefs >> addLoadedFiles >> resolveRelativeFilePaths
@@ -201,61 +202,61 @@ type FSharpCompilerServiceChecker(backgroundServiceEnabled, hasAnalyzers) =
     match errors with
     | [] ->
       let refs, otherOpts = projOptions.OtherOptions |> Array.partition (fun o -> o.StartsWith("-r"))
-      logQueueLength optsLogger (Log.setMessage "Resolved references: {refs}" >> Log.addContextDestructured "refs" refs)
-      logQueueLength optsLogger (Log.setMessage "Resolved other options: {otherOpts}" >> Log.addContextDestructured "otherOpts" otherOpts)
+      optsLogger.info (Log.setMessage "Resolved references: {refs}" >> Log.addContextDestructured "refs" refs)
+      optsLogger.info (Log.setMessage "Resolved other options: {otherOpts}" >> Log.addContextDestructured "otherOpts" otherOpts)
     | errs ->
-      logQueueLength optsLogger (Log.setLogLevel LogLevel.Error >> Log.setMessage "Resolved {opts} with {errors}" >> Log.addContextDestructured "opts" projOptions >> Log.addContextDestructured "errors" errs)
+      optsLogger.info (Log.setLogLevel LogLevel.Error >> Log.setMessage "Resolved {opts} with {errors}" >> Log.addContextDestructured "opts" projOptions >> Log.addContextDestructured "errors" errs)
 
     return projOptions
 
     // try
     //   match FakeSupport.detectFakeScript file with
     //   | None ->
-    //     logQueueLength optsLogger (Log.setMessage "{file} is not a FAKE script" >> Log.addContextDestructured "file" file)
+    //     optsLogger.info (Log.setMessage "{file} is not a FAKE script" >> Log.addContextDestructured "file" file)
     //     return projOptions
     //   | Some (detectionInfo) ->
-    //     logQueueLength optsLogger (Log.setMessage "{file} is a FAKE script" >> Log.addContextDestructured "file" file)
+    //     optsLogger.info (Log.setMessage "{file} is a FAKE script" >> Log.addContextDestructured "file" file)
     //     try
     //       let otherOpts = FakeSupport.getProjectOptions detectionInfo
-    //       logQueueLength optsLogger (Log.setMessage "Discovered FAKE options {otherOpts} " >> Log.addContextDestructured "file" file >> Log.addContextDestructured "otherOpts" otherOpts)
+    //       optsLogger.info (Log.setMessage "Discovered FAKE options {otherOpts} " >> Log.addContextDestructured "file" file >> Log.addContextDestructured "otherOpts" otherOpts)
     //       return { projOptions with OtherOptions = otherOpts }
     //     with e ->
-    //       logQueueLength optsLogger (Log.setLogLevel LogLevel.Error >> Log.setMessage "Error in FAKE script support" >> Log.addExn e)
+    //       optsLogger.info (Log.setLogLevel LogLevel.Error >> Log.setMessage "Error in FAKE script support" >> Log.addExn e)
     //       return projOptions
     // with
     // | e ->
-    //   logQueueLength optsLogger (Log.setMessage "error while checking if {file} is a FAKE script" >> Log.addContextDestructured "file" file >> Log.addExn e)
+    //   optsLogger.info (Log.setMessage "error while checking if {file} is a FAKE script" >> Log.addContextDestructured "file" file >> Log.addExn e)
     //   return projOptions
   }
 
   member __.GetBackgroundCheckResultsForFileInProject(fn: string<LocalPath>, opt) =
-    logQueueLength checkerLogger (Log.setMessage "GetBackgroundCheckResultsForFileInProject - {file}" >> Log.addContextDestructured "file" fn)
+    checkerLogger.info (Log.setMessage "GetBackgroundCheckResultsForFileInProject - {file}" >> Log.addContextDestructured "file" fn)
     let opt = clearProjectReferences opt
     checker.GetBackgroundCheckResultsForFileInProject(UMX.untag fn, opt)
     |> Async.map (fun (pr,cr) ->  ParseAndCheckResults (pr, cr, entityCache))
 
-  member __.FileChecked: IEvent<string<LocalPath> * obj option> =
+  member __.FileChecked: IEvent<string<LocalPath> * FSharpProjectOptions> =
     safeFileCheckedEvent
-    |> Event.map (fun (fileName, blob) -> UMX.tag fileName, blob) //path comes from the compiler, so it's safe to assume the tag in this case
+    |> Event.map (fun (fileName, projOptions) -> UMX.tag fileName, projOptions) //path comes from the compiler, so it's safe to assume the tag in this case
 
   member __.ScriptTypecheckRequirementsChanged =
     scriptTypecheckRequirementsChanged.Publish
 
   member __.ParseFile(fn: string<LocalPath>, source, fpo) =
-    logQueueLength checkerLogger (Log.setMessage "ParseFile - {file}" >> Log.addContextDestructured "file" fn)
+    checkerLogger.info (Log.setMessage "ParseFile - {file}" >> Log.addContextDestructured "file" fn)
     checker.ParseFile(UMX.untag fn, source, fpo)
 
   member __.ParseAndCheckFileInProject(filePath: string<LocalPath>, version, source, options) =
     async {
       let opName = sprintf "ParseAndCheckFileInProject - %A" filePath
-      logQueueLength checkerLogger (Log.setMessage "{opName}" >> Log.addContextDestructured "opName" opName)
+      checkerLogger.info (Log.setMessage "{opName}" >> Log.addContextDestructured "opName" opName)
       let options = clearProjectReferences options
       try
         let! (p, c) = checker.ParseAndCheckFileInProject (UMX.untag filePath, version, source, options, userOpName = opName)
-        let parseErrors = p.Errors |> Array.map (fun p -> p.Message)
+        let parseErrors = p.Diagnostics |> Array.map (fun p -> p.Message)
         match c with
         | FSharpCheckFileAnswer.Aborted ->
-          logQueueLength checkerLogger (Log.setMessage "{opName} completed with errors: {errors}" >> Log.addContextDestructured "opName" opName >> Log.addContextDestructured "errors" (List.ofArray p.Errors))
+          checkerLogger.info (Log.setMessage "{opName} completed with errors: {errors}" >> Log.addContextDestructured "opName" opName >> Log.addContextDestructured "errors" (List.ofArray p.Diagnostics))
           return ResultOrString.Error (sprintf "Check aborted (%A). Errors: %A" c parseErrors)
         | FSharpCheckFileAnswer.Succeeded(c) ->
           return Ok (ParseAndCheckResults(p, c, entityCache))
@@ -266,13 +267,13 @@ type FSharpCompilerServiceChecker(backgroundServiceEnabled, hasAnalyzers) =
 
   member __.TryGetRecentCheckResultsForFile(file: string<LocalPath>, options, ?source) =
     let opName = sprintf "TryGetRecentCheckResultsForFile - %A" file
-    logQueueLength checkerLogger (Log.setMessage "{opName}" >> Log.addContextDestructured "opName" opName)
+    checkerLogger.info (Log.setMessage "{opName}" >> Log.addContextDestructured "opName" opName)
     let options = clearProjectReferences options
     checker.TryGetRecentCheckResultsForFile(UMX.untag file, options, ?sourceText=source, userOpName=opName)
     |> Option.map (fun (pr, cr, _) -> ParseAndCheckResults (pr, cr, entityCache))
 
   member x.GetUsesOfSymbol (file: string<LocalPath>, options : (string * FSharpProjectOptions) seq, symbol : FSharpSymbol) = async {
-    logQueueLength checkerLogger (Log.setMessage "GetUsesOfSymbol - {file}" >> Log.addContextDestructured "file" file)
+    checkerLogger.info (Log.setMessage "GetUsesOfSymbol - {file}" >> Log.addContextDestructured "file" file)
     let projects = x.GetDependingProjects file options
     return!
       match projects with
@@ -290,7 +291,7 @@ type FSharpCompilerServiceChecker(backgroundServiceEnabled, hasAnalyzers) =
   }
 
   member __.GetDeclarations (fileName: string<LocalPath>, source, options, version) = async {
-    logQueueLength checkerLogger (Log.setMessage "GetDeclarations - {file}" >> Log.addContextDestructured "file" fileName)
+    checkerLogger.info (Log.setMessage "GetDeclarations - {file}" >> Log.addContextDestructured "file" fileName)
     let! parseResult = checker.ParseFile(UMX.untag fileName, source, options)
     return parseResult.GetNavigationItems().Declarations
   }

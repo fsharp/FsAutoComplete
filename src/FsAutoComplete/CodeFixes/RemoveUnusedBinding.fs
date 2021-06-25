@@ -7,39 +7,37 @@ open FsAutoComplete.CodeFix.Types
 open LanguageServerProtocol.Types
 open FsAutoComplete
 open FsAutoComplete.LspHelpers
-open FSharp.Compiler.SourceCodeServices
-open FSharp.Compiler.SyntaxTree
+open FSharp.Compiler.EditorServices
+open FSharp.Compiler.Syntax
 open FSharp.Compiler.Text
+open FSharp.Compiler.CodeAnalysis
 
 
 let posBetween (range: Range) tester =
-  Pos.posGeq tester range.Start // positions on this one are flipped to simulate Pos.posLte, because that doesn't exist
-  && Pos.posGeq range.End tester
+  Position.posGeq tester range.Start // positions on this one are flipped to simulate Pos.posLte, because that doesn't exist
+  && Position.posGeq range.End tester
 
 type FSharpParseFileResults with
   member this.TryRangeOfBindingWithHeadPatternWithPos pos =
-      this.ParseTree
-      |> Option.bind (fun input ->
-        AstTraversal.Traverse(pos, input, { new AstTraversal.AstVisitorBase<_>() with
-            member _.VisitExpr(_, _, defaultTraverse, expr) =
-                defaultTraverse expr
+    SyntaxTraversal.Traverse(pos, this.ParseTree, { new SyntaxVisitorBase<_>() with
+        member _.VisitExpr(_, _, defaultTraverse, expr) =
+            defaultTraverse expr
 
-            override _.VisitBinding(defaultTraverse, binding) =
-                match binding with
-                | SynBinding.Binding(_, SynBindingKind.NormalBinding, _, _, _, _, _, pat, _, _, _, _) as binding ->
-                    if posBetween binding.RangeOfHeadPat pos then
-                        Some binding.RangeOfBindingAndRhs
-                    else
-                        // Check if it's an operator
-                        match pat with
-                        | SynPat.LongIdent(LongIdentWithDots([id], _), _, _, _, _, _) when id.idText.StartsWith("op_") ->
-                            if posBetween id.idRange pos then
-                                Some binding.RangeOfBindingAndRhs
-                            else
-                                defaultTraverse binding
-                        | _ -> defaultTraverse binding
-                | _ -> defaultTraverse binding })
-      )
+        override _.VisitBinding(path, defaultTraverse, binding) =
+            match binding with
+            | SynBinding(_, SynBindingKind.Normal, _, _, _, _, _, pat, _, _, _, _) as binding ->
+                if posBetween binding.RangeOfHeadPattern pos then
+                    Some binding.RangeOfBindingWithRhs
+                else
+                    // Check if it's an operator
+                    match pat with
+                    | SynPat.LongIdent(LongIdentWithDots([id], _), _, _, _, _, _) when id.idText.StartsWith("op_") ->
+                        if posBetween id.idRange pos then
+                            Some binding.RangeOfBindingWithRhs
+                        else
+                            defaultTraverse binding
+                    | _ -> defaultTraverse binding
+            | _ -> defaultTraverse binding })
 
 let fix (getParseResults: GetParseResultsForFile): CodeFix =
   Run.ifDiagnosticByCode
