@@ -130,11 +130,13 @@ module Parser =
     rootCommand.SetHandler(
       Func<_, _, _, Task>(fun projectGraphEnabled stateDirectory adaptiveLspEnabled ->
         let workspaceLoaderFactory =
-          fun toolsPath ->
+          fun toolsPath props ->
+            let props = Map.merge ProjectLoader.globalProperties props |> Map.toList
+
             if projectGraphEnabled then
-              Ionide.ProjInfo.WorkspaceLoaderViaProjectGraph.Create(toolsPath, ProjectLoader.globalProperties)
+              Ionide.ProjInfo.WorkspaceLoaderViaProjectGraph.Create(toolsPath, props)
             else
-              Ionide.ProjInfo.WorkspaceLoader.Create(toolsPath, ProjectLoader.globalProperties)
+              Ionide.ProjInfo.WorkspaceLoader.Create(toolsPath, props)
 
         let dotnetPath =
           if

@@ -54,7 +54,7 @@ type AdaptiveWorkspaceChosen =
   | Projs of amap<string<LocalPath>, DateTime>
   | NotChosen
 
-type AdaptiveFSharpLspServer(workspaceLoader: IWorkspaceLoader, lspClient: FSharpLspClient) =
+type AdaptiveFSharpLspServer(workspaceLoader: Map<string, string> -> IWorkspaceLoader, lspClient: FSharpLspClient) =
 
   let thisType = typeof<AdaptiveFSharpLspServer>
 
@@ -509,8 +509,16 @@ type AdaptiveFSharpLspServer(workspaceLoader: IWorkspaceLoader, lspClient: FShar
 
     file |> addAValLogging logMsg
 
-  let loader = cval<Ionide.ProjInfo.IWorkspaceLoader> workspaceLoader
+  let loaderFactory =
+    cval<Map<string, string> -> Ionide.ProjInfo.IWorkspaceLoader> workspaceLoader
 
+  let loader =
+    aval {
+      let! loaderFactory = loaderFactory
+      and! config = config
+
+      return loaderFactory config.BuildOptions.MsBuildProperties
+    }
 
 
   let binlogConfig =

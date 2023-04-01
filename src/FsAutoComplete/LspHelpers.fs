@@ -609,6 +609,9 @@ type NotificationsDto =
   { Trace: bool option
     TraceNamespaces: string array option }
 
+type BuildOptionsDto =
+  { MsBuildProperties: Dictionary<string, string> option }
+
 type DebugDto =
   { DontCheckRelatedFiles: bool option
     CheckFileDebouncerTimeout: int option
@@ -662,6 +665,7 @@ type FSharpConfigDto =
     InlayHints: InlayHintDto option
     Fsac: FSACDto option
     Notifications: NotificationsDto option
+    BuildOptions: BuildOptionsDto option
     Debug: DebugDto option }
 
 type FSharpConfigRequest = { FSharp: FSharpConfigDto option }
@@ -726,6 +730,22 @@ type FSACConfig =
   member this.AddDto(dto: FSACDto) =
     { CachedTypeCheckCount = defaultArg dto.CachedTypeCheckCount this.CachedTypeCheckCount }
 
+type BuildOptions =
+  { MsBuildProperties: Map<string, string> }
+
+  static member Default = { MsBuildProperties = Map.empty }
+
+  static member FromDto(dto: BuildOptionsDto) : BuildOptions =
+    let props = dto.MsBuildProperties |> Option.map (Seq.map (|KeyValue|) >> Map.ofSeq)
+
+    { MsBuildProperties = defaultArg props BuildOptions.Default.MsBuildProperties }
+
+
+  member this.AddDto(dto: BuildOptionsDto) : BuildOptions =
+    let props = dto.MsBuildProperties |> Option.map (Seq.map (|KeyValue|) >> Map.ofSeq)
+
+    { MsBuildProperties = defaultArg props this.MsBuildProperties }
+
 type DebugConfig =
   { DontCheckRelatedFiles: bool
     CheckFileDebouncerTimeout: int
@@ -778,6 +798,7 @@ type FSharpConfig =
     InlineValues: InlineValuesConfig
     Notifications: NotificationsConfig
     Fsac: FSACConfig
+    BuildOptions: BuildOptions
     Debug: DebugConfig }
 
   static member Default: FSharpConfig =
@@ -820,6 +841,7 @@ type FSharpConfig =
       InlineValues = InlineValuesConfig.Default
       Notifications = NotificationsConfig.Default
       Fsac = FSACConfig.Default
+      BuildOptions = BuildOptions.Default
       Debug = DebugConfig.Default }
 
   static member FromDto(dto: FSharpConfigDto) : FSharpConfig =
@@ -893,6 +915,10 @@ type FSharpConfig =
         dto.Fsac
         |> Option.map FSACConfig.FromDto
         |> Option.defaultValue FSACConfig.Default
+      BuildOptions =
+        dto.BuildOptions
+        |> Option.map BuildOptions.FromDto
+        |> Option.defaultValue BuildOptions.Default
       Debug =
         match dto.Debug with
         | None -> DebugConfig.Default
@@ -981,6 +1007,10 @@ type FSharpConfig =
         |> Option.map x.Notifications.AddDto
         |> Option.defaultValue NotificationsConfig.Default
       Fsac = dto.Fsac |> Option.map x.Fsac.AddDto |> Option.defaultValue FSACConfig.Default
+      BuildOptions =
+        dto.BuildOptions
+        |> Option.map x.BuildOptions.AddDto
+        |> Option.defaultValue BuildOptions.Default
       Debug =
         match dto.Debug with
         | None -> DebugConfig.Default
