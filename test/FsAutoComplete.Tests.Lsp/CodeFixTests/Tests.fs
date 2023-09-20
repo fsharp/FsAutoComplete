@@ -3351,4 +3351,5 @@ let tests state =
       useTripleQuotedInterpolationTests state
       wrapExpressionInParenthesesTests state
       removeRedundantAttributeSuffixTests state
-      removePatternArgumentTests state ]
+      removePatternArgumentTests state
+      AddMissingWildcardOperatorTests.tests state ]
