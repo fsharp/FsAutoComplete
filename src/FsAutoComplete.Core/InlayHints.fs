@@ -946,8 +946,9 @@ let provideHints
                 parameterHints.Add hint
 
       | :? FSharpMemberOrFunctionOrValue as methodOrConstructor when
-        hintConfig.ShowParameterHints && methodOrConstructor.IsConstructor
-        -> // TODO: support methods when this API comes into FCS
+        hintConfig.ShowParameterHints
+        && (methodOrConstructor.IsMethod || methodOrConstructor.IsConstructor)
+        ->
         let endPosForMethod = symbolUse.Range.End
         let line, _ = Position.toZ endPosForMethod
 
@@ -970,13 +971,17 @@ let provideHints
             methodOrConstructor.CurriedParameterGroups |> Seq.concat |> Array.ofSeq // TODO: need ArgumentLocations to be surfaced
 
           for idx = 0 to parameters.Length - 1 do
-            // let paramLocationInfo = tupledParamInfos.ArgumentLocations.[idx]
+            let paramLocationInfo = tupledParamInfos.ArgumentLocations.[idx]
             let param = parameters.[idx]
             let paramName = param.DisplayName
 
-            // if shouldCreateHint param && paramLocationInfo.IsNamedArgument then
-            //     let hint = { Text = paramName + " ="; Pos = paramLocationInfo.ArgumentRange.Start; Kind = Parameter }
-            //     parameterHints.Add(hint)
+            if
+              ShouldCreate.paramHint methodOrConstructor param paramName
+              && paramLocationInfo.IsNamedArgument
+            then
+              let hint = createParamHint paramLocationInfo.ArgumentRange paramName
+              parameterHints.Add(hint)
+
             ()
 
         // This will only happen for curried methods defined in F#.
@@ -993,8 +998,7 @@ let provideHints
                 Some(definitionArgs.[i], v)
               else
                 None)
-            |> Array.filter Option.isSome
-            |> Array.map Option.get
+            |> Array.choose id
 
           for (definitionArg, appliedArgRange) in parms do
             let! appliedArgText = text[appliedArgRange]
