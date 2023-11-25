@@ -4,6 +4,7 @@
     <TargetFrameworks Condition="'$(BuildNet7)' == 'true'">net6.0;net7.0</TargetFrameworks>
     <TargetFrameworks Condition="'$(BuildNet8)' == 'true'">net6.0;net7.0;net8.0</TargetFrameworks>
     <IsPackable>false</IsPackable>
+    <LangVersion>preview</LangVersion>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\FsAutoComplete.Logging\FsAutoComplete.Logging.fsproj" />
@@ -58,6 +59,7 @@
     <Compile Include="SignatureHelp.fs" />
     <Compile Include="InlayHints.fs" />
     <Compile Include="SymbolLocation.fs" />
+    <Compile Include="NestedLanguages.fs" />
     <Compile Include="Commands.fs" />
   </ItemGroup>
   <Import Project="..\..\.paket\Paket.Restore.targets" />
