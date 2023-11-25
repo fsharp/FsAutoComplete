@@ -34,12 +34,8 @@ Environment.SetEnvironmentVariable("FSAC_WORKSPACELOAD_DELAY", "250")
 let loaders =
   [ "Ionide WorkspaceLoader",
     (fun toolpath -> WorkspaceLoader.Create(toolpath, FsAutoComplete.Core.ProjectLoader.globalProperties))
-  [ "Ionide WorkspaceLoader",
-    (fun toolpath -> WorkspaceLoader.Create(toolpath, FsAutoComplete.Core.ProjectLoader.globalProperties))
     // "MSBuild Project Graph WorkspaceLoader", (fun toolpath -> WorkspaceLoaderViaProjectGraph.Create(toolpath, FsAutoComplete.Core.ProjectLoader.globalProperties))
     ]
-    ]
-
 
 let adaptiveLspServerFactory toolsPath workspaceLoaderFactory sourceTextFactory =
   Helpers.createAdaptiveServer (fun () -> workspaceLoaderFactory toolsPath) sourceTextFactory
@@ -56,10 +52,8 @@ let lspTests =
 
         testList
           $"{loaderName}"
-          [
-            Templates.tests ()
-            let createServer () =
-              adaptiveLspServerFactory toolsPath workspaceLoaderFactory sourceTextFactory
+          [ Templates.tests ()
+            let createServer () = adaptiveLspServerFactory toolsPath workspaceLoaderFactory sourceTextFactory
 
             initTests createServer
             closeTests createServer
@@ -94,27 +88,25 @@ let lspTests =
             CodeFixTests.Tests.tests sourceTextFactory createServer
             Completion.tests createServer
             GoTo.tests createServer
-
             FindReferences.tests createServer
             Rename.tests createServer
-
-                InfoPanelTests.docFormattingTest createServer
-                DetectUnitTests.tests createServer
-                XmlDocumentationGeneration.tests createServer
-                InlayHintTests.tests createServer
-                DependentFileChecking.tests createServer
-                UnusedDeclarationsTests.tests createServer
-                EmptyFileTests.tests createServer
-                CallHierarchy.tests createServer
-                NestedLanguageTests.tests createServer
-                ] ]
+            InfoPanelTests.docFormattingTest createServer
+            DetectUnitTests.tests createServer
+            XmlDocumentationGeneration.tests createServer
+            InlayHintTests.tests createServer
+            DependentFileChecking.tests createServer
+            UnusedDeclarationsTests.tests createServer
+            EmptyFileTests.tests createServer
+            CallHierarchy.tests createServer
+            NestedLanguageTests.tests createServer ] ]
 
 /// Tests that do not require a LSP server
-let generalTests = testList "general" [
-  testList (nameof (Utils)) [ Utils.Tests.Utils.tests; Utils.Tests.TextEdit.tests ]
-  InlayHintTests.explicitTypeInfoTests sourceTextFactory
-  FindReferences.tryFixupRangeTests sourceTextFactory
-]
+let generalTests =
+  testList
+    "general"
+    [ testList (nameof (Utils)) [ Utils.Tests.Utils.tests; Utils.Tests.TextEdit.tests ]
+      InlayHintTests.explicitTypeInfoTests sourceTextFactory
+      FindReferences.tryFixupRangeTests sourceTextFactory ]
 
 [<Tests>]
 let tests = testList "FSAC" [ generalTests; lspTests ]
