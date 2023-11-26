@@ -217,7 +217,7 @@ let main args =
   let cts = new CancellationTokenSource(testTimeout)
 
   let args =
-    [ CLIArguments.Printer(Expecto.Impl.TestPrinters.summaryWithLocationPrinter defaultConfig.printer)
+    [ //CLIArguments.Printer(Expecto.Impl.TestPrinters.summaryWithLocationPrinter defaultConfig.printer)
       CLIArguments.Verbosity logLevel
       // CLIArguments.Parallel
       ]
