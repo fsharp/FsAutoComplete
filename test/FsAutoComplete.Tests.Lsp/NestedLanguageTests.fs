@@ -60,7 +60,7 @@ let tests state =
                 [| ("uri", [| (5, 31), (5, 51) |]) |]
                 server ])
 
-          fserverTestList "let bound function member" state defaultConfigDto None (fun server ->
+          serverTestList "let bound function member" state defaultConfigDto None (fun server ->
             [ hasLanguages
                 "with single string parameter"
                 """
@@ -68,4 +68,39 @@ let tests state =
             let u = foo "https://google.com"
             """
                 [| ("uri", [| (5, 31), (5, 51) |]) |]
-                server ]) ] ]
+                server ]) ]
+      ftestList "Sql" [
+        serverTestList "loose function" state defaultConfigDto None (fun server -> [
+          hasLanguages
+                "with single string parameter and string literal"
+                """
+            let foo (s: string) = ()
+            let u = foo "https://google.com"
+            """
+                [| ("foo", [| (2, 24), (2, 44) |]) |]
+                server
+
+          hasLanguages
+                "with single string parameter and interpolated string literal"
+                """
+            let foo (s: string) = ()
+            let u = foo $"https://{true}.com"
+            """
+                [| ("foo", [| (2, 24), (2, 35)
+                              (2,39), (2, 45) |]) |]
+                server
+
+          hasLanguages
+                "multiple lanuages in the same document"
+                """
+            let html (s: string) = ()
+            let sql (s: string) = ()
+            let myWebPage = html "<body>WOWEE</body>"
+            let myQuery = sql "select * from accounts where net_worth > 1000000"
+            """
+                [| ("html", [| (3, 33), (3, 53) |])
+                   ("sql", [| (4, 30), (4, 80) |]) |]
+                server
+        ]
+        )
+      ]]
