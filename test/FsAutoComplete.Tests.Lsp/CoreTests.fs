@@ -24,19 +24,20 @@ open FSharpx.Control
 open Utils.Tests
 open Helpers.Expecto.ShadowedTimeouts
 
+#nowarn "44" //we're testing so need to be able to use deprecated fields
+
 ///Test for initialization of the server
 let initTests createServer =
   testCaseAsync
     "InitTest"
     (async {
-      let tempDir =
-        Path.Combine(Path.GetTempPath(), "FsAutoComplete.Tests", Guid.NewGuid().ToString())
+      use tempDir = DisposableDirectory.Create()
 
       let (server: IFSharpLspServer, _event) = createServer ()
 
       let p: InitializeParams =
         { ProcessId = Some 1
-          RootPath = Some __SOURCE_DIRECTORY__
+          RootPath = None
           Locale = None
           RootUri = None
           InitializationOptions = Some(Server.serialize defaultConfigDto)
@@ -47,9 +48,9 @@ let initTests createServer =
                 Version = Some "0.0.0" }
           WorkspaceFolders =
             Some
-              [| { Uri = Path.FilePathToUri tempDir
+              [| { Uri = Path.FilePathToUri tempDir.DirectoryInfo.FullName
                    Name = "Test Folder" } |]
-          trace = None }
+          trace = Some "verbose" }
 
       let! result = server.Initialize p
 
@@ -112,7 +113,7 @@ let initTests createServer =
           "Workspace Symbol Provider"
 
         Expect.equal res.Capabilities.FoldingRangeProvider (Some true) "Folding Range Provider active"
-      | Result.Error _e -> failtest "Initialization failed"
+      | Result.Error e -> failtest e.Message
     })
 
 ///Tests for getting document symbols
@@ -140,14 +141,26 @@ let documentSymbolTest state =
           match res with
           | Result.Error e -> failtestf "Request failed: %A" e
           | Result.Ok None -> failtest "Request none"
-          | Result.Ok(Some(U2.First res)) ->
-            Expect.equal res.Length 15 "Document Symbol has all symbols"
+          | Result.Ok(Some(U2.First _)) -> raise (NotImplementedException("DocumentSymbol isn't used in FSAC yet"))
+
+          | Result.Ok(Some(U2.Second res)) ->
+
+            // have to unroll the document symbols since they are properly heirarchical now
+            let all (s: DocumentSymbol) =
+              [| yield s
+                 yield!
+                   (match s.Children with
+                    | Some c -> c
+                    | None -> [||]) |]
+
+            let allSymbols = res |> Array.collect all
+
+            Expect.equal allSymbols.Length 15 "Document Symbol has all symbols"
 
             Expect.exists
-              res
+              allSymbols
               (fun n -> n.Name = "MyDateTime" && n.Kind = SymbolKind.Class)
               "Document symbol contains given symbol"
-          | Result.Ok(Some(U2.Second _res)) -> raise (NotImplementedException("DocumentSymbol isn't used in FSAC yet"))
         }) ]
 
 let foldingTests state =

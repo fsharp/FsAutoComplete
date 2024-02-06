@@ -41,6 +41,8 @@ open System.Threading.Tasks
 open FsAutoComplete.FCSPatches
 open Helpers
 
+#nowarn "44" // we create CompletionItems here that have two deprecated properties. Since records always have to set each property....
+
 type AdaptiveFSharpLspServer
   (workspaceLoader: IWorkspaceLoader, lspClient: FSharpLspClient, sourceTextFactory: ISourceTextFactory) =
 
@@ -305,15 +307,22 @@ type AdaptiveFSharpLspServer
             | Some false -> None
             | None -> None
 
-          let actualRootPath =
-            match p.RootUri with
-            | Some rootUri -> Some(Path.FileUriToLocalPath rootUri)
-            | None -> p.RootPath
+          let workspaceRoot =
+            match p.WorkspaceFolders with
+            | None
+            | Some [||] ->
+              failwith
+                "Unable to start LSP server - no workspacePaths are available and we do not support the deprecated RootPath and RootUri options."
+            | Some folders -> Some(Path.FileUriToLocalPath folders[0].Uri)
 
           let projs =
-            match p.RootPath, c.AutomaticWorkspaceInit with
+            match workspaceRoot, c.AutomaticWorkspaceInit with
+            // if no workspace root available, or one is available but we don't want to automatically
+            // initialize the workspace, then we don't have any projects to initialize.
+            // in this case we need the client to call WorkspacePeek/WorkspaceLoad explicitly
             | None, _
-            | _, false -> state.WorkspacePaths
+            | _, false -> WorkspaceChosen.NotChosen
+            // otherwise, try to infer the workspace from the automatic workspace information
             | Some actualRootPath, true ->
               let peeks =
                 WorkspacePeek.peek
@@ -342,7 +351,7 @@ type AdaptiveFSharpLspServer
               |> WorkspaceChosen.Projs
 
           transact (fun () ->
-            state.RootPath <- actualRootPath
+            state.RootPath <- workspaceRoot
             state.ClientCapabilities <- p.Capabilities
             lspClient.ClientCapabilities <- p.Capabilities
 
@@ -545,7 +554,7 @@ type AdaptiveFSharpLspServer
             if lineStr.StartsWith("#", StringComparison.Ordinal) then
               let completionList =
                 { IsIncomplete = false
-                  Items = KeywordList.hashSymbolCompletionItems
+                  Items = KeywordList.hashSymbolCompletionItems p.Position
                   ItemDefaults = None }
 
 
@@ -624,7 +633,13 @@ type AdaptiveFSharpLspServer
                 | Some no when config.FullNameExternalAutocomplete -> sprintf "%s.%s" no d.NameInCode
                 | _ -> d.NameInCode
 
-              let createCompletionItem (config: FSharpConfig) (id: int) (d: DeclarationListItem) =
+              let textEdit text pos : U2<TextEdit, _> =
+                U2.First(
+                  { Range = { Start = pos; End = pos }
+                    NewText = text }
+                )
+
+              let createCompletionItem (config: FSharpConfig) insertPos (id: int) (d: DeclarationListItem) =
                 let code = getCodeToInsert d
 
                 /// The `label` for completion "System.Math.Ceiling" will be displayed as "Ceiling (System.Math)". This is to bias the viewer towards the member name,
@@ -641,7 +656,7 @@ type AdaptiveFSharpLspServer
                 { CompletionItem.Create(d.NameInList) with
                     Data = Some(JValue(d.FullName))
                     Kind = (state.GlyphToCompletionKind) d.Glyph
-                    InsertText = Some code
+                    TextEdit = Some(textEdit code insertPos)
                     SortText = Some(sprintf "%06d" id)
                     FilterText = Some filterText
                     Label = label }
@@ -668,13 +683,13 @@ type AdaptiveFSharpLspServer
 
                     let includeKeywords = config.KeywordsAutocomplete && shouldKeywords
 
-                    let items = decls |> Array.mapi (createCompletionItem config)
+                    let items = decls |> Array.mapi (createCompletionItem config p.Position)
 
                     let its =
                       if not includeKeywords then
                         items
                       else
-                        Array.append items KeywordList.keywordCompletionItems
+                        Array.append items (KeywordList.keywordCompletionItems p.Position)
 
                     let completionList =
                       { IsIncomplete = false
@@ -899,24 +914,26 @@ type AdaptiveFSharpLspServer
               else
                 TipFormatter.FormatCommentStyle.Legacy
 
+            let md text : MarkupContent =
+              { Kind = MarkupKind.Markdown
+                Value = text }
+
             match TipFormatter.tryFormatTipEnhanced tooltipResult.ToolTipText formatCommentStyle with
             | TipFormatter.TipFormatterResult.Success tooltipInfo ->
 
               // Display the signature as a code block
+
+              let fsharpCode s = "```fsharp\n" + s + "\n```"
+
               let signature =
-                tooltipResult.Signature
-                |> TipFormatter.prepareSignature
-                |> (fun content -> MarkedString.WithLanguage { Language = "fsharp"; Value = content })
+                tooltipResult.Signature |> TipFormatter.prepareSignature |> fsharpCode
 
               // Display each footer line as a separate line
-              let footerLines =
-                tooltipResult.Footer
-                |> TipFormatter.prepareFooterLines
-                |> Array.map MarkedString.String
+              let footerLines = tooltipResult.Footer |> TipFormatter.prepareFooterLines
 
               let contents =
                 [| signature
-                   MarkedString.String tooltipInfo.DocComment
+                   tooltipInfo.DocComment
                    match tooltipResult.SymbolInfo with
                    | TryGetToolTipEnhancedResult.Keyword _ -> ()
                    | TryGetToolTipEnhancedResult.Symbol symbolInfo ->
@@ -924,20 +941,19 @@ type AdaptiveFSharpLspServer
                        tooltipInfo.HasTruncatedExamples
                        symbolInfo.XmlDocSig
                        symbolInfo.Assembly
-                     |> MarkedString.String
                    yield! footerLines |]
 
               let response =
-                { Contents = MarkedStrings contents
+                { Contents = contents |> String.join Environment.NewLine |> md |> MarkupContent
                   Range = None }
 
               return (Some response)
 
             | TipFormatter.TipFormatterResult.Error error ->
-              let contents = [| MarkedString.String "<Note>"; MarkedString.String error |]
+              let contents = md $"<Note>\n {error}"
 
               let response =
-                { Contents = MarkedStrings contents
+                { Contents = MarkupContent contents
                   Range = None }
 
               return (Some response)
@@ -1250,6 +1266,7 @@ type AdaptiveFSharpLspServer
           return! returnException e
       }
 
+    /// This is mostly used to power the per-document @-based searching in VSCode. Open the Command Palette, type a query starting with @SOME_MEMBER_NAME, and quickly go to that member in the current file
     override __.TextDocumentDocumentSymbol(p: DocumentSymbolParams) =
       asyncResult {
         let tags = [ "DocumentSymbolParams", box p ]
@@ -1267,11 +1284,10 @@ type AdaptiveFSharpLspServer
           | Some decls ->
             return
               decls
-              |> Array.collect (fun top ->
-                getSymbolInformations p.TextDocument.Uri state.GlyphToSymbolKind top (fun _s -> true))
-              |> U2.First
+              |> Array.map (getDocumentSymbol state.GlyphToSymbolKind)
+              |> U2.Second
               |> Some
-          | None -> return! LspResult.internalError $"No declarations for {fn}"
+          | None -> return None
         with e ->
           trace |> Tracing.recordException e
 
@@ -1285,6 +1301,7 @@ type AdaptiveFSharpLspServer
       }
 
 
+    /// This is used to power the "Go to symbol in workspace" feature in VSCode. Open the Command Palette, type a query starting with #SOME_MEMBER_NAME, and quickly go to that member in the entire workspace
     override __.WorkspaceSymbol(symbolRequest: WorkspaceSymbolParams) =
       asyncResult {
         let tags = [ "WorkspaceSymbolParams", box symbolRequest ]
@@ -1306,12 +1323,9 @@ type AdaptiveFSharpLspServer
               let uri = Path.LocalPathToUri p
 
               ns
-              |> Array.collect (fun n ->
-                getSymbolInformations uri glyphToSymbolKind n (applyQuery symbolRequest.Query)))
-            |> U2.First
-            |> Some
+              |> Array.collect (fun n -> getWorkspaceSymbols uri glyphToSymbolKind n (applyQuery symbolRequest.Query)))
 
-          return res
+          return Some(U2.Second res)
         with e ->
           trace |> Tracing.recordException e
 
@@ -3062,16 +3076,16 @@ type AdaptiveFSharpLspServer
 
     override x.Dispose() = disposables.Dispose()
 
-    member this.WorkDoneProgressCancel(token: ProgressToken) : Async<unit> =
+    member this.WorkDoneProgressCancel(progressParams: WorkDoneProgressCancelParams) : Async<unit> =
       async {
 
-        let tags = [ "ProgressToken", box token ]
+        let tags = [ "ProgressToken", box progressParams.token ]
         use trace = fsacActivitySource.StartActivityForType(thisType, tags = tags)
 
         try
           logger.info (
             Log.setMessage "WorkDoneProgressCancel Request: {params}"
-            >> Log.addContextDestructured "params" token
+            >> Log.addContextDestructured "params" progressParams.token
           )
 
         with e ->
@@ -3079,7 +3093,7 @@ type AdaptiveFSharpLspServer
 
           logger.error (
             Log.setMessage "WorkDoneProgressCancel Request Errored {p}"
-            >> Log.addContextDestructured "token" token
+            >> Log.addContextDestructured "token" progressParams.token
             >> Log.addExn e
           )
 
@@ -3146,8 +3160,6 @@ module AdaptiveFSharpLspServer =
           | _ -> base.CreateErrorDetails(request, ex)
 
     }
-
-
 
   let startCore toolsPath workspaceLoaderFactory sourceTextFactory =
     use input = Console.OpenStandardInput()

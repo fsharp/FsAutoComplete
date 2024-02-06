@@ -15,10 +15,12 @@ open Expecto
 open Utils
 open Ionide.ProjInfo.Logging
 
+#nowarn "44" //we're testing so need to be able to use deprecated fields
+
 let private logger = LogProvider.getLoggerByName "Utils.Server"
 
 type Server =
-  { RootPath: string option
+  { RootPath: string
     Server: IFSharpLspServer
     Events: ClientEvents
     mutable UntitledCounter: int }
@@ -28,26 +30,22 @@ type CachedServer = Async<Server>
 
 type Document =
   { Server: Server
-    FilePath : string
+    FilePath: string
     Uri: DocumentUri
     mutable Version: int }
+
   member doc.TextDocumentIdentifier: TextDocumentIdentifier = { Uri = doc.Uri }
 
   member doc.VersionedTextDocumentIdentifier: VersionedTextDocumentIdentifier =
-    { Uri = doc.Uri
-      Version = doc.Version }
+    { Uri = doc.Uri; Version = doc.Version }
 
   member x.Diagnostics =
-    x.Server.Events
-    |> fileDiagnosticsForUri x.TextDocumentIdentifier.Uri
+    x.Server.Events |> fileDiagnosticsForUri x.TextDocumentIdentifier.Uri
 
-  member x.CompilerDiagnostics =
-    x.Diagnostics
-    |> diagnosticsFromSource "F# Compiler"
+  member x.CompilerDiagnostics = x.Diagnostics |> diagnosticsFromSource "F# Compiler"
 
   interface IDisposable with
-    override doc.Dispose() : unit =
-      doc |> Document.close |> Async.RunSynchronously
+    override doc.Dispose() : unit = doc |> Document.close |> Async.RunSynchronously
 
 module Server =
   let private initialize path (config: FSharpConfigDto) createServer =
@@ -57,22 +55,24 @@ module Server =
         >> Log.addContextDestructured "path" path
       )
 
-      match path with
-      | None -> ()
-      | Some path ->
-        dotnetCleanup path
+      let path =
+        match path with
+        | Some p -> p
+        | None -> DisposableDirectory.Create().DirectoryInfo.FullName
 
-        for file in System.IO.Directory.EnumerateFiles(path, "*.fsproj", SearchOption.AllDirectories) do
-          do! file |> Path.GetDirectoryName |> dotnetRestore
+      dotnetCleanup path
 
-      let (server : IFSharpLspServer, events : IObservable<_>) = createServer ()
+      for file in System.IO.Directory.EnumerateFiles(path, "*.fsproj", SearchOption.AllDirectories) do
+        do! file |> Path.GetDirectoryName |> dotnetRestore
+
+      let (server: IFSharpLspServer, events: IObservable<_>) = createServer ()
       events |> Observable.add logEvent
 
       let p: InitializeParams =
         { ProcessId = Some 1
-          RootPath = path
+          RootPath = None
           Locale = None
-          RootUri = path |> Option.map (sprintf "file://%s")
+          RootUri = None
           InitializationOptions = Some(Server.serialize config)
           Capabilities = Some clientCaps
           ClientInfo =
@@ -80,15 +80,15 @@ module Server =
               { Name = "FSAC Tests"
                 Version = Some "0.0.0" }
           WorkspaceFolders =
-            path
-            |> Option.map (fun p ->
-              [| { Uri = Path.FilePathToUri p
-                   Name = "Test Folder" } |])
+            Some
+              [| { Uri = Path.FilePathToUri path
+                   Name = "Test Folder" } |]
           trace = None }
 
       match! server.Initialize p with
       | Ok _ ->
-        do! server.Initialized (InitializedParams())
+        do! server.Initialized(InitializedParams())
+
         return
           { RootPath = path
             Server = server
@@ -101,8 +101,7 @@ module Server =
     async {
       let! server = initialize path config createServer
 
-      if path |> Option.isSome then
-        do! waitForWorkspaceFinishedParsing server.Events
+      do! waitForWorkspaceFinishedParsing server.Events
 
       return server
     }
@@ -131,9 +130,7 @@ module Server =
     async {
       let! server = server
 
-      let doc =
-        server
-        |> createDocument String.Empty (server |> nextUntitledDocUri)
+      let doc = server |> createDocument String.Empty (server |> nextUntitledDocUri)
 
       let! diags = doc |> Document.openWith initialText
 
@@ -154,24 +151,19 @@ module Server =
         if Path.IsPathRooted path then
           path
         else
-          Expect.isSome server.RootPath "relative path is only possible when `server.RootPath` is specified!"
-          Path.Combine(server.RootPath.Value, path)
+          Path.Combine(server.RootPath, path)
 
       let doc =
         server
         |> createDocument
           fullPath
-          (
-            fullPath
-            // normalize path is necessary: otherwise might be different lower/upper cases in uri for tests and LSP server:
-            // on windows `E:\...`: `file:///E%3A/...` (before normalize) vs. `file:///e%3A/..` (after normalize)
-            |> normalizePath
-            |> Path.LocalPathToUri
-          )
+          (fullPath
+           // normalize path is necessary: otherwise might be different lower/upper cases in uri for tests and LSP server:
+           // on windows `E:\...`: `file:///E%3A/...` (before normalize) vs. `file:///e%3A/..` (after normalize)
+           |> normalizePath
+           |> Path.LocalPathToUri)
 
-      let! diags =
-        doc
-        |> Document.openWith (File.ReadAllText fullPath)
+      let! diags = doc |> Document.openWith (File.ReadAllText fullPath)
 
       return (doc, diags)
     }
@@ -187,19 +179,16 @@ module Server =
   let openDocumentWithText path (initialText: string) (server: CachedServer) =
     async {
       let! server = server
-      assert (server.RootPath |> Option.isSome)
 
       let fullPath =
-        Path.Combine(server.RootPath.Value, path)
+        Path.Combine(server.RootPath, path)
         |> Utils.normalizePath
         |> FSharp.UMX.UMX.untag
 
       // To avoid hitting the typechecker cache, we need to update the file's timestamp
       IO.File.SetLastWriteTimeUtc(fullPath, DateTime.UtcNow)
 
-      let doc =
-        server
-        |> createDocument fullPath (Path.FilePathToUri fullPath)
+      let doc = server |> createDocument fullPath (Path.FilePathToUri fullPath)
 
       let! diags = doc |> Document.openWith initialText
 
@@ -211,11 +200,7 @@ module Document =
   open System.Threading.Tasks
 
   let private typedEvents<'t> typ : _ -> System.IObservable<'t> =
-    Observable.choose (fun (typ', _o) ->
-      if typ' = typ then
-        Some(unbox _o)
-      else
-        None)
+    Observable.choose (fun (typ', _o) -> if typ' = typ then Some(unbox _o) else None)
 
   /// `textDocument/publishDiagnostics`
   ///
@@ -225,11 +210,7 @@ module Document =
   let diagnosticsStream (doc: Document) =
     doc.Server.Events
     |> typedEvents<PublishDiagnosticsParams> "textDocument/publishDiagnostics"
-    |> Observable.choose (fun n ->
-      if n.Uri = doc.Uri then
-        Some n.Diagnostics
-      else
-        None)
+    |> Observable.choose (fun n -> if n.Uri = doc.Uri then Some n.Diagnostics else None)
 
   /// `fsharp/documentAnalyzed`
   let analyzedStream (doc: Document) =
@@ -241,21 +222,19 @@ module Document =
   /// in ms
   let private waitForLateDiagnosticsDelay =
     let envVar = "FSAC_WaitForLateDiagnosticsDelay"
+
     System.Environment.GetEnvironmentVariable envVar
     |> Option.ofObj
     |> Option.map (fun d ->
       match System.Int32.TryParse d with
       | (true, d) -> d
-      | (false, _) ->
-          failwith $"Environment Variable '%s{envVar}' exists, but is not a correct int number ('%s{d}')"
-    )
+      | (false, _) -> failwith $"Environment Variable '%s{envVar}' exists, but is not a correct int number ('%s{d}')")
     |> Option.orElseWith (fun _ ->
-        // set in Github Actions: https://docs.github.com/en/actions/learn-github-actions/environment-variables#default-environment-variables
-        match System.Environment.GetEnvironmentVariable "CI" with
-        | null -> None
-        | _ -> Some 25
-    )
-    |> Option.defaultValue 7  // testing locally
+      // set in Github Actions: https://docs.github.com/en/actions/learn-github-actions/environment-variables#default-environment-variables
+      match System.Environment.GetEnvironmentVariable "CI" with
+      | null -> None
+      | _ -> Some 25)
+    |> Option.defaultValue 7 // testing locally
 
   /// Waits (if necessary) and gets latest diagnostics.
   ///
@@ -298,6 +277,7 @@ module Document =
         >> Log.addContext "uri" doc.Uri
         >> Log.addContext "version" doc.Version
       )
+
       let tcs = TaskCompletionSource<_>()
 
       use _ =
@@ -313,7 +293,7 @@ module Document =
         )
         |> Observable.bufferSpan (timeout)
         // |> Observable.timeoutSpan timeout
-        |> Observable.subscribe(fun x -> tcs.SetResult x)
+        |> Observable.subscribe (fun x -> tcs.SetResult x)
 
       let! result = tcs.Task |> Async.AwaitTask
 
@@ -322,11 +302,10 @@ module Document =
 
 
   /// Note: Mutates passed `doc`
-  let private incrVersion (doc: Document) =
-    System.Threading.Interlocked.Increment(&doc.Version)
+  let private incrVersion (doc: Document) = System.Threading.Interlocked.Increment(&doc.Version)
 
   /// Note: Mutates passed `doc`
-  let private incrVersionedTextDocumentIdentifier (doc: Document): VersionedTextDocumentIdentifier =
+  let private incrVersionedTextDocumentIdentifier (doc: Document) : VersionedTextDocumentIdentifier =
     { Uri = doc.Uri
       Version = incrVersion doc }
 
@@ -343,8 +322,8 @@ module Document =
 
       try
         return! doc |> waitForLatestDiagnostics Helpers.defaultTimeout
-      with
-      | :? TimeoutException -> return failwith $"Timeout waiting for latest diagnostics for {doc.Uri}"
+      with :? TimeoutException ->
+        return failwith $"Timeout waiting for latest diagnostics for {doc.Uri}"
     }
 
   let close (doc: Document) =
@@ -371,12 +350,11 @@ module Document =
       return! doc |> waitForLatestDiagnostics Helpers.defaultTimeout
     }
 
-  let saveText (text : string) (doc : Document) =
+  let saveText (text: string) (doc: Document) =
     async {
-      let p : DidSaveTextDocumentParams = {
-        Text = Some text
-        TextDocument = doc.TextDocumentIdentifier
-      }
+      let p: DidSaveTextDocumentParams =
+        { Text = Some text
+          TextDocument = doc.TextDocumentIdentifier }
       // Simulate the file being written to disk so we don't hit the typechecker cache
       IO.File.SetLastWriteTimeUtc(doc.FilePath, DateTime.UtcNow)
       do! doc.Server.Server.TextDocumentDidSave p
@@ -387,8 +365,7 @@ module Document =
   let private assertOk result =
     Expect.isOk result "Expected success"
 
-    result
-    |> Result.defaultWith (fun _ -> failtest "not reachable")
+    result |> Result.defaultWith (fun _ -> failtest "not reachable")
 
   let private assertSome opt =
     Expect.isSome opt "Expected to have Some"
@@ -401,21 +378,27 @@ module Document =
       let ps: CodeActionParams =
         { TextDocument = doc.TextDocumentIdentifier
           Range = range
-          Context = { Diagnostics = diagnostics; Only = None; TriggerKind = None } }
+          Context =
+            { Diagnostics = diagnostics
+              Only = None
+              TriggerKind = None } }
 
       let! res = doc.Server.Server.TextDocumentCodeAction ps
       return res |> assertOk
     }
 
-  let inlayHintsAt range (doc: Document) = async {
-    let ps: InlayHintParams = {
-      Range = range
-      TextDocument = doc.TextDocumentIdentifier
+  let inlayHintsAt range (doc: Document) =
+    async {
+      let ps: InlayHintParams =
+        { Range = range
+          TextDocument = doc.TextDocumentIdentifier }
+
+      let! res = doc.Server.Server.TextDocumentInlayHint ps
+      return res |> assertOk |> assertSome
     }
-    let! res = doc.Server.Server.TextDocumentInlayHint ps
-    return res |> assertOk |> assertSome
-  }
-  let resolveInlayHint inlayHint (doc: Document) = async {
-    let! res = doc.Server.Server.InlayHintResolve inlayHint
-    return res |> assertOk
-  }
+
+  let resolveInlayHint inlayHint (doc: Document) =
+    async {
+      let! res = doc.Server.Server.InlayHintResolve inlayHint
+      return res |> assertOk
+    }
