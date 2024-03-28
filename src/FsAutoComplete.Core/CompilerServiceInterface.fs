@@ -12,7 +12,7 @@ open FSharp.Compiler.Symbols
 open Microsoft.Extensions.Caching.Memory
 open System
 open FsToolkit.ErrorHandling
-
+open FSharp.Compiler.CodeAnalysis.ProjectSnapshot
 
 
 type Version = int
@@ -29,7 +29,8 @@ type FSharpCompilerServiceChecker(hasAnalyzers, typecheckCacheSize, parallelRefe
       enablePartialTypeChecking = not hasAnalyzers,
       parallelReferenceResolution = parallelReferenceResolution,
       captureIdentifiersWhenParsing = true,
-      useSyntaxTreeCache = true
+      useSyntaxTreeCache = true,
+      useTransparentCompiler = true
     )
 
   let entityCache = EntityCache()
@@ -51,7 +52,7 @@ type FSharpCompilerServiceChecker(hasAnalyzers, typecheckCacheSize, parallelRefe
 
   /// additional arguments that are added to typechecking of scripts
   let mutable fsiAdditionalArguments = Array.empty
-  let mutable fsiAdditionalFiles = Array.empty
+  let mutable fsiAdditionalFiles = List.empty
 
   /// This event is raised when any data that impacts script typechecking
   /// is changed. This can potentially invalidate existing project options
@@ -60,19 +61,31 @@ type FSharpCompilerServiceChecker(hasAnalyzers, typecheckCacheSize, parallelRefe
 
   let mutable disableInMemoryProjectReferences = false
 
-  let fixupFsharpCoreAndFSIPaths (p: FSharpProjectOptions) =
+  let fixupFsharpCoreAndFSIPaths (snapshot: FSharpProjectSnapshot) =
     match sdkFsharpCore, sdkFsiAuxLib with
     | None, _
-    | _, None -> p
+    | _, None -> snapshot
     | Some fsc, Some fsi ->
       let _toReplace, otherOpts =
-        p.OtherOptions
-        |> Array.partition (fun opt ->
+        snapshot.OtherOptions
+        |> List.partition (fun opt ->
           opt.EndsWith("FSharp.Core.dll", StringComparison.Ordinal)
           || opt.EndsWith("FSharp.Compiler.Interactive.Settings.dll", StringComparison.Ordinal))
 
-      { p with
-          OtherOptions = Array.append otherOpts [| $"-r:%s{fsc.FullName}"; $"-r:%s{fsi.FullName}" |] }
+      FSharpProjectSnapshot.Create(
+        snapshot.ProjectFileName,
+        snapshot.ProjectId,
+        snapshot.SourceFiles,
+        snapshot.ReferencesOnDisk,
+        List.append otherOpts [ $"-r:%s{fsc.FullName}"; $"-r:%s{fsi.FullName}" ],
+        snapshot.ReferencedProjects,
+        snapshot.IsIncompleteTypeCheckEnvironment,
+        snapshot.UseScriptResolutionRules,
+        snapshot.LoadTime,
+        snapshot.UnresolvedReferences,
+        snapshot.OriginalLoadReferences,
+        snapshot.Stamp
+      )
 
   let (|StartsWith|_|) (prefix: string) (s: string) =
     if s.StartsWith(prefix, StringComparison.Ordinal) then
@@ -88,23 +101,17 @@ type FSharpCompilerServiceChecker(hasAnalyzers, typecheckCacheSize, parallelRefe
       | StartsWith "--load:" file -> args, Array.append files [| file |]
       | arg -> Array.append args [| arg |], files)
 
-  let clearProjectReferences (opts: FSharpProjectOptions) =
-    if disableInMemoryProjectReferences then
-      { opts with ReferencedProjects = [||] }
-    else
-      opts
 
   /// ensures that any user-configured include/load files are added to the typechecking context
-  let addLoadedFiles (projectOptions: FSharpProjectOptions) =
-    let files = Array.append fsiAdditionalFiles projectOptions.SourceFiles
+  let addLoadedFiles (snapshot: FSharpProjectSnapshot) =
+    let files = List.append fsiAdditionalFiles snapshot.SourceFiles
 
     optsLogger.info (
       Log.setMessage "Source file list is {files}"
       >> Log.addContextDestructured "files" files
     )
 
-    { projectOptions with
-        SourceFiles = files }
+    snapshot.Replace(files)
 
   let (|Reference|_|) (opt: string) =
     if opt.StartsWith("-r:", StringComparison.Ordinal) then
@@ -112,37 +119,26 @@ type FSharpCompilerServiceChecker(hasAnalyzers, typecheckCacheSize, parallelRefe
     else
       None
 
-  /// ensures that all file paths are absolute before being sent to the compiler, because compilation of scripts fails with relative paths
-  let resolveRelativeFilePaths (projectOptions: FSharpProjectOptions) =
-    { projectOptions with
-        SourceFiles = projectOptions.SourceFiles |> Array.map Path.GetFullPath
-        OtherOptions =
-          projectOptions.OtherOptions
-          |> Array.map (fun opt ->
-            match opt with
-            | Reference r -> $"-r:{Path.GetFullPath r}"
-            | opt -> opt) }
-
   member __.DisableInMemoryProjectReferences
     with get () = disableInMemoryProjectReferences
     and set (value) = disableInMemoryProjectReferences <- value
 
-  static member GetDependingProjects (file: string<LocalPath>) (options: seq<string * FSharpProjectOptions>) =
+  static member GetDependingProjects (file: string<LocalPath>) (snapshots: seq<string * FSharpProjectSnapshot>) =
     let project =
-      options
+      snapshots
       |> Seq.tryFind (fun (k, _) -> (UMX.untag k).ToUpperInvariant() = (UMX.untag file).ToUpperInvariant())
 
     project
     |> Option.map (fun (_, option) ->
       option,
       [ yield!
-          options
+          snapshots
           |> Seq.map snd
           |> Seq.distinctBy (fun o -> o.ProjectFileName)
           |> Seq.filter (fun o ->
             o.ReferencedProjects
-            |> Array.map (fun p -> Path.GetFullPath p.OutputFile)
-            |> Array.contains option.ProjectFileName) ])
+            |> List.map (fun p -> Path.GetFullPath p.OutputFile)
+            |> List.contains option.ProjectFileName) ])
 
   member private __.GetNetFxScriptOptions(file: string<LocalPath>, source) =
     async {
@@ -154,7 +150,7 @@ type FSharpCompilerServiceChecker(hasAnalyzers, typecheckCacheSize, parallelRefe
       let allFlags = Array.append [| "--targetprofile:mscorlib" |] fsiAdditionalArguments
 
       let! (opts, errors) =
-        checker.GetProjectOptionsFromScript(
+        checker.GetProjectSnapshotFromScript(
           UMX.untag file,
           source,
           assumeDotNetFramework = true,
@@ -163,7 +159,7 @@ type FSharpCompilerServiceChecker(hasAnalyzers, typecheckCacheSize, parallelRefe
           userOpName = "getNetFrameworkScriptOptions"
         )
 
-      let allModifications = addLoadedFiles >> resolveRelativeFilePaths
+      let allModifications = addLoadedFiles
 
       return allModifications opts, errors
     }
@@ -178,8 +174,8 @@ type FSharpCompilerServiceChecker(hasAnalyzers, typecheckCacheSize, parallelRefe
       let allFlags =
         Array.append [| "--targetprofile:netstandard" |] fsiAdditionalArguments
 
-      let! (opts, errors) =
-        checker.GetProjectOptionsFromScript(
+      let! (snapshot, errors) =
+        checker.GetProjectSnapshotFromScript(
           UMX.untag file,
           source,
           assumeDotNetFramework = false,
@@ -190,17 +186,17 @@ type FSharpCompilerServiceChecker(hasAnalyzers, typecheckCacheSize, parallelRefe
         )
 
       optsLogger.trace (
-        Log.setMessage "Got NetCore options {opts} for file {file} with errors {errors}"
+        Log.setMessage "Got NetCore snapshot {snapshot} for file {file} with errors {errors}"
         >> Log.addContextDestructured "file" file
-        >> Log.addContextDestructured "opts" opts
+        >> Log.addContextDestructured "snapshot" snapshot
         >> Log.addContextDestructured "errors" errors
       )
 
       let allModifications =
         // filterBadRuntimeRefs >>
-        addLoadedFiles >> resolveRelativeFilePaths >> fixupFsharpCoreAndFSIPaths
+        addLoadedFiles >> fixupFsharpCoreAndFSIPaths
 
-      let modified = allModifications opts
+      let modified = allModifications snapshot
 
       optsLogger.trace (
         Log.setMessage "Replaced options to {opts}"
@@ -210,7 +206,7 @@ type FSharpCompilerServiceChecker(hasAnalyzers, typecheckCacheSize, parallelRefe
       return modified, errors
     }
 
-  member self.GetProjectOptionsFromScript(file: string<LocalPath>, source, tfm) =
+  member self.GetProjectOptionsFromScript(file: string<LocalPath>, source, tfm: FSIRefs.TFM) =
     match tfm with
     | FSIRefs.TFM.NetFx -> self.GetNetFxScriptOptions(file, source)
     | FSIRefs.TFM.NetCore -> self.GetNetCoreScriptOptions(file, source)
@@ -221,6 +217,8 @@ type FSharpCompilerServiceChecker(hasAnalyzers, typecheckCacheSize, parallelRefe
 
   member _.RemoveFileFromCache(file: string<LocalPath>) = lastCheckResults.Remove(file)
 
+  member _.ClearCache(snap: FSharpProjectSnapshot seq) = snap |> Seq.map (fun x -> x.Identifier) |> checker.ClearCache
+
   /// This function is called when the entire environment is known to have changed for reasons not encoded in the ProjectOptions of any project/compilation.
   member _.ClearCaches() =
     lastCheckResults.Dispose()
@@ -230,10 +228,9 @@ type FSharpCompilerServiceChecker(hasAnalyzers, typecheckCacheSize, parallelRefe
 
   /// <summary>Parses a source code for a file and caches the results. Returns an AST that can be traversed for various features.</summary>
   /// <param name="filePath"> The path for the file. The file name is used as a module name for implicit top level modules (e.g. in scripts).</param>
-  /// <param name="source">The source to be parsed.</param>
-  /// <param name="options">Parsing options for the project or script.</param>
+  /// <param name="snapshot">Parsing options for the project or script.</param>
   /// <returns></returns>
-  member __.ParseFile(filePath: string<LocalPath>, source: ISourceText, options: FSharpParsingOptions) =
+  member x.ParseFile(filePath: string<LocalPath>, snapshot: FSharpProjectSnapshot) =
     async {
       checkerLogger.info (
         Log.setMessage "ParseFile - {file}"
@@ -241,23 +238,19 @@ type FSharpCompilerServiceChecker(hasAnalyzers, typecheckCacheSize, parallelRefe
       )
 
       let path = UMX.untag filePath
-      return! checker.ParseFile(path, source, options)
+      return! checker.ParseFile(path, snapshot)
     }
 
   /// <summary>Parse and check a source code file, returning a handle to the results</summary>
   /// <param name="filePath">The name of the file in the project whose source is being checked.</param>
-  /// <param name="version">An integer that can be used to indicate the version of the file. This will be returned by TryGetRecentCheckResultsForFile when looking up the file</param>
-  /// <param name="source">The source for the file.</param>
-  /// <param name="options">The options for the project or script.</param>
+  /// <param name="snapshot">The snapshot for the project or script.</param>
   /// <param name="shouldCache">Determines if the typecheck should be cached for autocompletions.</param>
   /// <remarks>Note: all files except the one being checked are read from the FileSystem API</remarks>
   /// <returns>Result of ParseAndCheckResults</returns>
-  member __.ParseAndCheckFileInProject
+  member _.ParseAndCheckFileInProject
     (
       filePath: string<LocalPath>,
-      version,
-      source: ISourceText,
-      options,
+      snapshot: FSharpProjectSnapshot,
       ?shouldCache: bool
     ) =
     asyncResult {
@@ -266,11 +259,10 @@ type FSharpCompilerServiceChecker(hasAnalyzers, typecheckCacheSize, parallelRefe
 
       checkerLogger.info (Log.setMessage "{opName}" >> Log.addContextDestructured "opName" opName)
 
-      let options = clearProjectReferences options
       let path = UMX.untag filePath
 
       try
-        let! (p, c) = checker.ParseAndCheckFileInProject(path, version, source, options, userOpName = opName)
+        let! (p, c) = checker.ParseAndCheckFileInProject(path, snapshot, userOpName = opName)
 
         let parseErrors = p.Diagnostics |> Array.map (fun p -> p.Message)
 
@@ -326,42 +318,25 @@ type FSharpCompilerServiceChecker(hasAnalyzers, typecheckCacheSize, parallelRefe
     | (true, v) -> Some v
     | _ -> None
 
-  member __.TryGetRecentCheckResultsForFile(file: string<LocalPath>, options, source: ISourceText) =
+  member _.TryGetRecentCheckResultsForFile(file: string<LocalPath>, snapshot: FSharpProjectSnapshot) =
     let opName = sprintf "TryGetRecentCheckResultsForFile - %A" file
 
-    checkerLogger.info (
-      Log.setMessage "{opName} - {hash}"
-      >> Log.addContextDestructured "opName" opName
-      >> Log.addContextDestructured "hash" (source.GetHashCode() |> int)
+    checkerLogger.info (Log.setMessage "{opName} - {hash}" >> Log.addContextDestructured "opName" opName)
 
-    )
+    checker.TryGetRecentCheckResultsForFile(UMX.untag file, snapshot, opName)
+    |> Option.map (fun (pr, cr) ->
+      checkerLogger.info (
+        Log.setMessage "{opName} - got results - {version}"
+        >> Log.addContextDestructured "opName" opName
+      )
 
-    let options = clearProjectReferences options
+      ParseAndCheckResults(pr, cr, entityCache))
 
-    let result =
-      checker.TryGetRecentCheckResultsForFile(UMX.untag file, options, sourceText = source, userOpName = opName)
-      |> Option.map (fun (pr, cr, version) ->
-        checkerLogger.info (
-          Log.setMessage "{opName} - got results - {version}"
-          >> Log.addContextDestructured "opName" opName
-          >> Log.addContextDestructured "version" version
-        )
 
-        ParseAndCheckResults(pr, cr, entityCache))
-
-    checkerLogger.info (
-      Log.setMessage "{opName} - {hash} - cacheHit {cacheHit}"
-      >> Log.addContextDestructured "opName" opName
-      >> Log.addContextDestructured "hash" (source.GetHashCode() |> int)
-      >> Log.addContextDestructured "cacheHit" result.IsSome
-    )
-
-    result
-
-  member x.GetUsesOfSymbol
+  member _.GetUsesOfSymbol
     (
       file: string<LocalPath>,
-      options: (string * FSharpProjectOptions) seq,
+      snapshots: (string * FSharpProjectSnapshot) seq,
       symbol: FSharpSymbol
     ) =
     async {
@@ -370,19 +345,17 @@ type FSharpCompilerServiceChecker(hasAnalyzers, typecheckCacheSize, parallelRefe
         >> Log.addContextDestructured "file" file
       )
 
-      match FSharpCompilerServiceChecker.GetDependingProjects file options with
+      match FSharpCompilerServiceChecker.GetDependingProjects file snapshots with
       | None -> return [||]
       | Some(opts, []) ->
-        let opts = clearProjectReferences opts
-        let! res = checker.ParseAndCheckProject opts
+        let! res = checker.ParseAndCheckProject(opts)
         return res.GetUsesOfSymbol symbol
       | Some(opts, dependentProjects) ->
         let! res =
           opts :: dependentProjects
           |> List.map (fun (opts) ->
             async {
-              let opts = clearProjectReferences opts
-              let! res = checker.ParseAndCheckProject opts
+              let! res = checker.ParseAndCheckProject(opts)
               return res.GetUsesOfSymbol symbol
             })
           |> Async.parallel75
@@ -390,34 +363,16 @@ type FSharpCompilerServiceChecker(hasAnalyzers, typecheckCacheSize, parallelRefe
         return res |> Array.concat
     }
 
-  member _.FindReferencesForSymbolInFile(file, project, symbol) =
+  member _.FindReferencesForSymbolInFile(file, project: FSharpProjectSnapshot, symbol) =
     async {
       checkerLogger.info (
         Log.setMessage "FindReferencesForSymbolInFile - {file}"
         >> Log.addContextDestructured "file" file
       )
 
-      return!
-        checker.FindBackgroundReferencesInFile(
-          file,
-          project,
-          symbol,
-          canInvalidateProject = false,
-          // fastCheck = true,
-          userOpName = "find references"
-        )
+      return! checker.FindBackgroundReferencesInFile(file, project, symbol, userOpName = "find references")
     }
 
-  member __.GetDeclarations(fileName: string<LocalPath>, source: ISourceText, options: FSharpParsingOptions, _) =
-    async {
-      checkerLogger.info (
-        Log.setMessage "GetDeclarations - {file}"
-        >> Log.addContextDestructured "file" fileName
-      )
-
-      let! parseResult = checker.ParseFile(UMX.untag fileName, source, options, userOpName = "getDeclarations")
-      return parseResult.GetNavigationItems().Declarations
-    }
 
   member __.SetDotnetRoot(dotnetBinary: FileInfo, cwd: DirectoryInfo) =
     match Ionide.ProjInfo.SdkDiscovery.versionAt cwd dotnetBinary with
@@ -456,5 +411,10 @@ type FSharpCompilerServiceChecker(hasAnalyzers, typecheckCacheSize, parallelRefe
     else
       let additionalArgs, files = processFSIArgs args
       fsiAdditionalArguments <- additionalArgs
-      fsiAdditionalFiles <- files
+
+      fsiAdditionalFiles <-
+        files
+        |> Array.map (fun f -> FSharpFileSnapshot.CreateFromFileSystem(System.IO.Path.GetFullPath f))
+        |> Array.toList
+
       scriptTypecheckRequirementsChanged.Trigger()

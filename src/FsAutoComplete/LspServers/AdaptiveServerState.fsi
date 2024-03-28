@@ -30,7 +30,8 @@ type AdaptiveWorkspaceChosen =
 
 [<CustomEquality; NoComparison>]
 type LoadedProject =
-  { FSharpProjectOptions: FSharpProjectOptions
+  { ProjectOptions: Types.ProjectOptions
+    FSharpProjectSnapshot: aval<FSharpProjectSnapshot>
     LanguageVersion: LanguageVersionShim }
 
   interface IEquatable<LoadedProject>
@@ -38,7 +39,7 @@ type LoadedProject =
   override Equals: other: obj -> bool
   member SourceFiles: string array
   member ProjectFileName: string
-  static member op_Implicit: x: LoadedProject -> FSharpProjectOptions
+// static member op_Implicit: x: LoadedProject -> FSharpProjectSnapshot
 
 type AdaptiveState =
   new:
@@ -51,31 +52,30 @@ type AdaptiveState =
   member ClientCapabilities: ClientCapabilities option with get, set
   member WorkspacePaths: WorkspaceChosen with get, set
   member DiagnosticCollections: DiagnosticCollection
-  member ScriptFileProjectOptions: Event<FSharpProjectOptions>
+  member ScriptFileProjectOptions: Event<FSharpProjectSnapshot>
 
 
   member OpenDocument: filePath: string<LocalPath> * text: string * version: int -> CancellableTask<unit>
   member ChangeDocument: filePath: string<LocalPath> * p: DidChangeTextDocumentParams -> CancellableTask<unit>
   member SaveDocument: filePath: string<LocalPath> * text: string option -> CancellableTask<unit>
   member ForgetDocument: filePath: DocumentUri -> Async<unit>
-  member ParseAllFiles: unit -> Async<FSharpParseFileResults option array>
-  member GetOpenFile: filePath: string<LocalPath> -> VolatileFile option
+  member ParseAllFiles: unit -> Async<FSharpParseFileResults array>
   member GetOpenFileSource: filePath: string<LocalPath> -> Async<Result<IFSACSourceText, string>>
   member GetOpenFileOrRead: filePath: string<LocalPath> -> Async<Result<VolatileFile, string>>
   member GetParseResults: filePath: string<LocalPath> -> Async<Result<FSharpParseFileResults, string>>
   member GetOpenFileTypeCheckResults: file: string<LocalPath> -> Async<Result<ParseAndCheckResults, string>>
   member GetOpenFileTypeCheckResultsCached: filePath: string<LocalPath> -> Async<Result<ParseAndCheckResults, string>>
-  member GetProjectOptionsForFile: filePath: string<LocalPath> -> Async<Result<FSharpProjectOptions, string>>
+  member GetProjectOptionsForFile: filePath: string<LocalPath> -> Async<Result<FSharpProjectSnapshot, string>>
 
   member GetTypeCheckResultsForFile:
-    filePath: string<LocalPath> * opts: FSharpProjectOptions -> Async<Result<ParseAndCheckResults, string>>
+    filePath: string<LocalPath> * opts: FSharpProjectSnapshot -> Async<Result<ParseAndCheckResults, string>>
 
   member GetTypeCheckResultsForFile: filePath: string<LocalPath> -> Async<Result<ParseAndCheckResults, string>>
   member GetFilesToProject: unit -> Async<(string<LocalPath> * LoadedProject) array>
 
   member GetUsesOfSymbol:
     filePath: string<LocalPath> *
-    opts: (string * FSharpProjectOptions) seq *
+    opts: (string * FSharpProjectSnapshot) seq *
     symbol: FSharp.Compiler.Symbols.FSharpSymbol ->
       Async<FSharpSymbolUse array>
 

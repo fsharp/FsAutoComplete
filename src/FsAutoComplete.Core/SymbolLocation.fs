@@ -9,16 +9,15 @@ open FsToolkit.ErrorHandling
 [<RequireQualifiedAccess; NoComparison>]
 type SymbolDeclarationLocation =
   | CurrentDocument
-  | Projects of FSharpProjectOptions list * isLocalForProject: bool
+  | Projects of FSharpProjectSnapshot list * isLocalForProject: bool
 
 let getDeclarationLocation
   (
     symbolUse: FSharpSymbolUse,
     currentDocument: IFSACSourceText,
     getProjectOptions,
-    projectsThatContainFile: string<LocalPath> -> Async<FSharpProjectOptions list>,
-    getDependentProjectsOfProjects
-  // state: State
+    projectsThatContainFile: string<LocalPath> -> Async<FSharpProjectSnapshot list>,
+    getDependentProjectsOfProjects: FSharpProjectSnapshot list -> FSharpProjectSnapshot list
   ) : Async<Option<SymbolDeclarationLocation>> =
   asyncOption {
 

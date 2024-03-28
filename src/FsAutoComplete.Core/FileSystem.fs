@@ -140,6 +140,7 @@ type IFSACSourceText =
     position: Position * terminal: (char -> bool) * condition: (char -> bool) -> option<Position>
 
   inherit ISourceText
+  inherit ISourceTextNew
 
 module RoslynSourceText =
   open Microsoft.CodeAnalysis.Text
@@ -385,9 +386,37 @@ module RoslynSourceText =
       member _.CopyTo(sourceIndex, destination, destinationIndex, count) =
         sourceText.CopyTo(sourceIndex, destination, destinationIndex, count)
 
+    interface ISourceTextNew with
+      member this.GetChecksum() = sourceText.GetChecksum()
+
 type ISourceTextFactory =
   abstract member Create: fileName: string<LocalPath> * text: string -> IFSACSourceText
   abstract member Create: fileName: string<LocalPath> * stream: Stream -> CancellableValueTask<IFSACSourceText>
+
+module SourceTextFactory =
+  // Could be configurable but using the default for now
+  // https://learn.microsoft.com/en-us/dotnet/core/runtime-config/garbage-collector#large-object-heap-threshold
+  [<Literal>]
+  let LargeObjectHeapThreshold = 85000
+
+  let readFile (fileName: string<LocalPath>) (sourceTextFactory: ISourceTextFactory) =
+    cancellableValueTask {
+      let file = UMX.untag fileName
+
+      // use large object heap hits or threadpool hits? Which is worse? Choose your foot gun.
+
+      if FileInfo(file).Length >= LargeObjectHeapThreshold then
+        // Roslyn SourceText doesn't actually support async streaming reads but avoids the large object heap hit
+        // so we have to block a thread.
+        use s = File.openFileStreamForReadingAsync fileName
+        let! source = sourceTextFactory.Create(fileName, s)
+        return source
+      else
+        // otherwise it'll be under the LOH threshold and the current thread isn't blocked
+        let! text = fun ct -> File.ReadAllTextAsync(file, ct)
+        let source = sourceTextFactory.Create(fileName, text)
+        return source
+    }
 
 type RoslynSourceTextFactory() =
   interface ISourceTextFactory with
